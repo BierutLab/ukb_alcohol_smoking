@@ -1,0 +1,243 @@
+---
+title: "N IDPs in negative health direction"
+---
+
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+library(openxlsx)
+
+```
+
+Set the date prior steps of the pipeline were run
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+
+Set the filepath to get input files
+```{r}
+# Home computer
+input_path <- "C:/Users/tvera/Box/UK Biobank/Data Sets/"
+
+# Work computer
+#input_path <- "C:/Users/vthornton/Box/UK Biobank/Data Sets/"
+
+```
+
+Set the filepath to save outputs to
+```{r}
+# Home computer
+output_path <- "C:/Users/tvera/Box/UK Biobank/Alcohol x smoking/"
+
+# Work computer
+#output_path <- "C:/Users/vthornton/Box/UK Biobank/Alcohol x smoking/"
+
+```
+
+
+```{r}
+
+# Load the results
+load(paste0(output_path, "regression_scaled_", run_date, ".RData"))
+
+```
+
+Set p value to reference through the script
+```{r}
+
+p_value <- 0.01
+
+```
+
+Is a decrease bad?
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(decrease_bad = case_when(
+    region == "ventricles" ~ 0,
+    numeric_IDP %in% c(26527, 26567, 26598) ~ 0, # short term fix for total CSF and choroid plexus
+    MRI == "T1" ~ 1,
+    MRI == "T2" ~ 1,
+    dMRI %in% c("FA", "ICVF") ~ 1,
+    dMRI %in% c("MD", "ISOVF") ~ 0))
+
+```
+
+
+
+```{r}
+
+
+total_volume_IDPs <- c("X26514.2.0", "X26518.2.0", "total_wm", "X26527.2.0")
+
+all_IDP_results %>%
+  mutate(map = ifelse(IDP %in% total_volume_IDPs, "total volume", map)) %>%
+  group_by(MRI, map, dMRI, decrease_bad) %>%
+  tally()
+
+```
+
+IDPs correctly sorted by decrease bad
+
+
+It isn't clear how to interpret rfMRI, so drop the 6 ICs
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  filter(MRI != "rfMRI")
+
+```
+
+Alcohol
+Filter for IDPs with a significant association with alcohol
+```{r}
+
+sig_alcohol <- all_IDP_results %>%
+  filter(scaled_week_drinks_p < p_value) %>%
+  mutate(direction = ifelse(scaled_week_drinks_beta < 0, "neg", "pos")) %>%
+  mutate(health = case_when(
+    (direction == "neg" & decrease_bad == 1) ~ "neg health",
+    (direction == "pos" & decrease_bad == 0) ~ "neg health",
+    (direction == "neg" & decrease_bad == 0) ~ "pos health",
+    (direction == "pos" & decrease_bad == 1) ~ "pos health"))
+
+```
+
+
+```{r}
+
+all_alcohol <- sig_alcohol %>%
+  group_by(health) %>%
+  tally() %>%
+  pivot_wider(names_from = health, values_from = n) %>%
+  mutate(set_name = "all_alcohol") %>%
+  relocate(set_name, .before = 'neg health') %>%
+  mutate(substance = "alcohol")
+
+all_alcohol
+
+```
+Out of 230 IDPs significantly associated with alcohol at the 1% level, 221 (96%) are in the direction of reduced brain health. Only 9 are in a direction which is consistent with improved health.
+
+Do it for regional measures
+```{r}
+
+regional_alcohol <- sig_alcohol %>%
+  mutate(map = ifelse(IDP %in% total_volume_IDPs, "total volume", map)) %>%
+  group_by(MRI, map, dimension, health) %>%
+  tally() %>%
+  mutate(map = factor(map, levels = c("total volume", "freesurfer_DKT", "freesurfer_ASEG"))) %>%
+  arrange(map) %>%
+  mutate(MRI = factor(MRI, levels = c("T1", "T2", "rfMRI", "dMRI"))) %>%
+  arrange(MRI) %>%
+  mutate(set_name = paste0(MRI, "_", map, "_", dimension)) %>%
+  mutate(set_name = gsub("_NA", "", set_name)) %>%
+  ungroup() %>%
+  select(-c(MRI, map, dimension)) %>%
+  pivot_wider(id_cols = set_name, names_from = health, values_from = n) %>%
+  mutate(substance = "alcohol")
+
+regional_alcohol
+
+```
+
+Smoking
+Filter for IDPs with a significant association with smoking
+```{r}
+
+sig_smoking <- all_IDP_results %>%
+  filter(scaled_pack_years_p < p_value) %>%
+  mutate(direction = ifelse(scaled_pack_years_beta < 0, "neg", "pos")) %>%
+  mutate(health = case_when(
+    (direction == "neg" & decrease_bad == 1) ~ "neg health",
+    (direction == "pos" & decrease_bad == 0) ~ "neg health",
+    (direction == "neg" & decrease_bad == 0) ~ "pos health",
+    (direction == "pos" & decrease_bad == 1) ~ "pos health"))
+
+```
+
+
+```{r}
+
+all_smoking <- sig_smoking %>%
+  group_by(health) %>%
+  tally() %>%
+  pivot_wider(names_from = health, values_from = n) %>%
+  mutate(set_name = "all_smoking") %>%
+  relocate(set_name, .before = 'neg health') %>%
+  mutate(substance = "smoking")
+
+all_smoking
+
+```
+Out of 167 IDPs significantly associated with smoking at the 1% level, 164 (98%) are in the direction of reduced brain health. Only 9 are in a direction which is consistent with improved health.
+
+Do it for regional measures
+```{r}
+
+regional_smoking <- sig_smoking %>%
+  mutate(map = ifelse(IDP %in% total_volume_IDPs, "total volume", map)) %>%
+  group_by(MRI, map, dimension, health) %>%
+  tally() %>%
+  mutate(map = factor(map, levels = c("total volume", "freesurfer_DKT", "freesurfer_ASEG"))) %>%
+  arrange(map) %>%
+  mutate(MRI = factor(MRI, levels = c("T1", "T2", "rfMRI", "dMRI"))) %>%
+  arrange(MRI) %>%
+  mutate(set_name = paste0(MRI, "_", map, "_", dimension)) %>%
+  mutate(set_name = gsub("_NA", "", set_name)) %>%
+  ungroup() %>%
+  select(-c(MRI, map, dimension)) %>%
+  pivot_wider(id_cols = set_name, names_from = health, values_from = n) %>%
+  mutate(substance = "smoking")
+
+regional_smoking
+
+```
+
+As of 9/24/24, there are NO IDPs associated with smoking in the direction of positive brain health
+Check if this column is missing and add it so we can use rbind
+```{r}
+
+all_smoking <- all_smoking %>%
+  mutate(`pos health` = NA) %>%
+  relocate(`pos health`, .before = substance)
+
+
+regional_smoking <- regional_smoking %>%
+  mutate(`pos health` = NA) %>%
+  relocate(`pos health`, .before = substance)
+
+```
+
+```{r}
+
+health_direction <- all_alcohol %>%
+  rbind(regional_alcohol) %>%
+  rbind(all_smoking) %>%
+  rbind(regional_smoking) %>%
+  relocate(substance, .before = set_name) %>%
+  mutate(`pos health` = ifelse(is.na(`pos health`), 0, `pos health`)) %>%
+  mutate(total_IDPs = `neg health` + `pos health`) %>%
+  mutate(percent_neg_health = `neg health` / total_IDPs * 100) %>%
+  mutate(percent_neg_health = round(percent_neg_health))
+
+health_direction
+
+```
+
+```{r}
+
+save(health_direction, file = paste0("health_direction_", Sys.Date(), ".RData"))
+
+
+```
+
+

@@ -4,6 +4,11 @@ title: "Supplement excel results"
 
 Output the regression results as .xlsx files with multiple tabs and a general info front page
 
+8/28/24 small updates in response to Julie feedback
+7/29/24 genetic PC are back in
+7/24/23 Added title, authors, the equations, make it easier to find key results
+
+
 ```{r}
 library(dplyr) # Run install.packages("tidyverse") to get this
 library(tidyr) # Run install.packages("tidyr") to get this
@@ -22,15 +27,27 @@ run_date <- "2024-07-29"
 
 ```
 
-Set the filepaths for input and output
-ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+
+Set the filepath to get input files
 ```{r}
+# Home computer
+input_path <- "C:/Users/tvera/Box/UK Biobank/Data Sets/"
 
-input_path <- # data set storage location
-
-output_path <- # script outputs storage location
+# Work computer
+#input_path <- "C:/Users/vthornton/Box/UK Biobank/Data Sets/"
 
 ```
+
+Set the filepath to save outputs to
+```{r}
+# Home computer
+output_path <- "C:/Users/tvera/Box/UK Biobank/Alcohol x smoking/"
+
+# Work computer
+#output_path <- "C:/Users/vthornton/Box/UK Biobank/Alcohol x smoking/"
+
+```
+
 
 ==============================================================================
 Generate excel file with main analysis results
@@ -95,6 +112,8 @@ general_info <- data.frame((rbind(
   c("Scaled total volumes", "Results in total brain volumes WITH z-score normalizing IDP or main predictors",
     "total brain IDP (normalized) ~ scaled drinks per week + scaled pack years + scaled drinks per week*pack years + covariates"),
   c("Correlation", "Correlation between z-scores of alcohol and smoking in sets based on MRI sequence / parcellation",
+    " "),
+  c("Health direction", "How many IDPs surpassing the 1% significance threshold in each set are in the direction of negative vs. positive brain health",
     " "),
   c("freesurfer DKT", "Results in area, thickness, and volume IDPs from Freesurfer DKT parcellation",
     "regional IDP (scaled) ~ scaled drinks per week + scaled pack years + scaled drinks per week*scaled pack years + covariates"),
@@ -222,12 +241,13 @@ rm(all_IDP_results)
 ```
 
 
-Load scaled total volumes and correlation results
+Load scaled total volumes, correlation results, and the health direction counts
 ```{r}
 
 
 load(paste0(output_path, "regression_UNscaled_", run_date, ".RData"))
 load(paste0("correlation_results_", "2024-08-14", ".RData"))
+load(paste0("health_direction_", "2024-09-24", ".RData"))
 
 unscaled_results <- all_IDP_results
 rm(all_IDP_results)
@@ -301,6 +321,7 @@ results <- list("general_info" = general_info,
                         "unscaled_total_volumes" = unscaled_total_volume,
                         "scaled_total_volumes" = scaled_total_volume,
                         "correlation" = corr_results_table,
+                        "health direction" = health_direction,
                         "DKT_cortical" = select(filter(main_results, map == "freesurfer_DKT"), where(~!all(is.na(.x)))),
                         "ASEG_subcortical" = aseg_results,
                         "T2" = select(filter(main_results, MRI == "T2"), where(~!all(is.na(.x)))),
