@@ -1,0 +1,625 @@
+---
+title: "Alcohol x smoking demographics"
+output:
+  html_document:
+    df_print: paged
+---
+
+7/29/24 Output a full table with everything to go in the supplement, and a shorter table with only the things referenced in the text for the main table 1
+For demographics ONLY, alcohol and smoking go after education
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+```{r}
+
+load(paste0(output_path, "filtered_eid_p2_", run_date, ".RData"))
+
+```
+
+Load the unscaled covariates generated after imputation
+```{r}
+
+load(paste0(output_path, "un_scaled_covariates_", run_date, ".RData"))
+
+```
+
+Update filtered eid to not include former alcohol use
+```{r}
+
+un_scaled %>%
+  group_by(alcohol_status) %>%
+  tally()
+
+```
+
+Filter out
+```{r}
+
+un_scaled <- un_scaled %>%
+  filter(alcohol_status != "Former")
+
+un_scaled %>%
+  group_by(alcohol_status) %>%
+  tally()
+
+```
+
+```{r}
+
+filtered_eid <- pull(select(un_scaled, n_eid))
+
+```
+
+
+For demographics, we also want to include race
+No filtering on race / ethnicity
+```{r}
+
+ethnicity <- read.csv(paste0(input_path, "race_ethnicity_6_13_23.csv"))
+
+```
+
+Race / ethnicity
+Data field 21000 ethnic background
+Uses data coding 1001
+1001 = White British
+1002 = Irish
+1003 = Any other white background
+
+The take-away is that most of this sample is white so coding as white and non-white
+Report percentage known to be white vs. non white and unknown
+More participants have values from the baseline survey
+```{r}
+
+ethnicity <- ethnicity %>%
+  filter(n_eid %in% filtered_eid) %>%
+  dplyr::rename("ethnicity" = n_21000_0_0) %>%
+  mutate(ethnicity = case_when(
+    ethnicity == 1001 ~ 1,
+    ethnicity == 1002 ~ 1,
+    ethnicity == 1003 ~ 1,
+    TRUE ~ 0))
+
+```
+
+Add on to un-scaled
+```{r}
+
+un_scaled <- un_scaled %>%
+  left_join(select(ethnicity, c(n_eid, ethnicity)), by = "n_eid")
+
+```
+
+
+Construct the demographics table
+Table structured:
+covariate name -- groups
+```{r}
+
+demo_table <- data.frame("covariate" = c("N"),
+                         "groups" = c(" "),
+                         "n" = c(nrow(un_scaled)))
+
+demo_table
+
+```
+
+
+```{r}
+
+
+alcohol_status <- un_scaled %>%
+  select(alcohol_status) %>%
+  group_by(alcohol_status) %>%
+  tally() %>%
+  mutate(covariate = "Alcohol use") %>%
+  relocate(covariate, .before = alcohol_status) %>%
+  dplyr::rename("groups" = alcohol_status) %>%
+  mutate(groups = factor(groups, levels = c("Never", "Former", "Current"))) %>%
+  arrange(groups)
+
+
+alcohol_status
+
+```
+
+
+Drinks per week
+```{r}
+
+dpw <- un_scaled %>%
+  mutate(groups = case_when(
+    alcohol_status == "Never" ~ "0 (never / former)",
+    alcohol_status == "Former" ~ "0 (never / former)",
+    week_drinks <= 1 ~ "<=1",
+    week_drinks <= 7 ~ ">1 - 7",
+    week_drinks <= 14 ~ ">7 - 14",
+    week_drinks <= 21 ~ ">14 - 21",
+    week_drinks > 21 ~ ">21")) %>%
+  select(groups) %>%
+  group_by(groups) %>%
+  tally() %>%
+  mutate(groups = factor(groups, levels = c("0 (never / former)", "<=1", ">1 - 7",
+                                            ">7 - 14", ">14 - 21", ">21"))) %>%
+  arrange(groups) %>%
+  filter(! is.na(groups)) %>%
+  mutate(covariate = "Drinks per week") %>%
+  relocate(covariate, .before = groups)
+
+dpw
+
+```
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(dpw$n) == nrow(un_scaled)
+
+```
+
+What is the distribution of drinks per week in participants who currently consume alcohol?
+```{r}
+
+un_scaled %>%
+  filter(alcohol_status == "Current") %>%
+  ggplot(aes(x = week_drinks)) +
+  geom_histogram()
+
+```
+
+```{r}
+
+un_scaled %>%
+  filter(alcohol_status == "Current") %>%
+  summarise(median = median(week_drinks))
+
+```
+
+
+```{r}
+
+smoking_status <- un_scaled %>%
+  select(smoking_status) %>%
+  group_by(smoking_status) %>%
+  tally() %>%
+  mutate(covariate = "Smoking") %>%
+  relocate(covariate, .before = smoking_status) %>%
+  dplyr::rename("groups" = smoking_status) %>%
+  mutate(groups = factor(groups, levels = c("Never", "Former", "Current"))) %>%
+  arrange(groups)
+
+smoking_status
+
+```
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(smoking_status$n) == nrow(un_scaled)
+
+```
+
+Note: Participants who indicated current daily smoking in data field 1239 or past daily smoking in data field 1249 are considered to have a history of daily smoking and were asked about pack years. Participants with a history of daily smoking have a median of 15 pack years.
+
+What IS the distribution of pack years in daily smokers?
+```{r}
+
+un_scaled %>%
+  filter(ever_daily_smoked == 1) %>%
+  ggplot(aes(x = pack_years)) +
+  geom_histogram()
+
+```
+
+```{r}
+
+un_scaled %>%
+  filter(ever_daily_smoked == 1) %>%
+  summarise(median = median(pack_years))
+
+```
+
+
+Pack years
+```{r}
+
+pack_years <- un_scaled %>%
+  mutate(groups = case_when(
+    never_smoked == 1 ~ "0 (never)",
+    pack_years <= 1 ~ "<=1 (infrequent)",
+    pack_years <= 10 ~ ">1 - 10",
+    pack_years <= 20 ~ ">10 - 20",
+    pack_years <= 40 ~ ">20 - 40",
+    pack_years > 40 ~ ">40")) %>%
+  select(groups) %>%
+  group_by(groups) %>%
+  tally() %>%
+  mutate(groups = factor(groups, levels = c("0 (never)", "<=1 (infrequent)", ">1 - 10",
+                                            ">10 - 20", ">20 - 40", ">40", "other"))) %>%
+  arrange(groups) %>%
+  filter(! is.na(groups)) %>%
+  mutate(covariate = "Pack years smoking") %>%
+  relocate(covariate, .before = groups)
+
+pack_years
+
+
+```
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(pack_years$n) == nrow(un_scaled)
+
+```
+
+Add sex
+
+```{r}
+
+percent_male <- formatC((sum(un_scaled$sex == 1) / nrow(un_scaled) * 100), digits = 1, format = "f")
+percent_female <- formatC((sum(un_scaled$sex == 0) / nrow(un_scaled) * 100), digits = 1, format = "f")
+
+
+sex <- data.frame("covariate" = c("Sex", "Sex"),
+                  "groups" = c("Female", "Male"),
+                  "n" = c(sum(un_scaled$sex == 0), sum(un_scaled$sex == 1)))
+
+sex
+
+```
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(sex$n) == nrow(un_scaled)
+
+```
+
+Age
+```{r}
+
+age <- un_scaled %>%
+  mutate(groups = case_when(
+    age < 60 ~ "<60",
+    age >= 70 ~ "70+",
+    TRUE ~ "60 - 69")) %>%
+  select(groups) %>%
+  group_by(groups) %>%
+  tally() %>%
+  mutate(covariate = "Age") %>%
+  relocate(covariate, .before = groups)
+
+age
+
+```
+
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(age$n) == nrow(un_scaled)
+
+```
+
+Race / ethnicity
+```{r}
+
+ethnicity <- data.frame("covariate" = c("Race / ethnicity"),
+                  "groups" = c("White"),
+                  "n" = c(sum(un_scaled$ethnicity == 1)))
+
+ethnicity
+
+```
+
+
+
+
+```{r}
+
+un_scaled %>%
+  group_by(income) %>%
+  tally()
+
+```
+
+
+
+```{r}
+
+income <- un_scaled %>%
+  select(income) %>%
+  mutate(income = case_when(
+    income < 17999 ~ "<18,000",
+    income < 30999 ~ "18,000-30,999",
+    income < 51999 ~ "31,000-51,999",
+    income < 99999 ~ "52,000-99,999",
+    income >= 100000 ~ ">100,000")) %>%
+  group_by(income) %>%
+  tally() %>%
+  mutate(income = factor(income, levels = c("<18,000", "18,000-30,999", "31,000-51,999",
+                                            "52,000-99,999", ">100,000"))) %>%
+  arrange(income) %>%
+  dplyr::rename("groups" = income) %>%
+  mutate(covariate = "Income") %>%
+  relocate(covariate, .before = groups)
+
+income
+
+```
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(income$n) == nrow(un_scaled)
+
+```
+
+We want education as high, mid, or low, classified by qualification
+High ((1)College or University degree [ISCED 5 (20)])
+Mid ((2)A levels/AS levels or equivalent [ISCED 3], (5)NVQ or HND or HNC or equivalent [ISCED (19)], (6) Other prof. qual. eg: nursing, teaching [ISCED 4])
+Low ((3)O levels/GCSEs or equivalent [ISCED 2], (4)CSEs or equivalent [ISCED 2], (7)None of the above [ISCED 1])
+
+6/27/23 UKB added Data coding 100305
+1	College or University degree
+2	A levels/AS levels or equivalent
+3	O levels/GCSEs or equivalent
+4	CSEs or equivalent
+5	NVQ or HND or HNC or equivalent
+6	Other professional qualifications eg: nursing, teaching
+-7	None of the above
+-3	Prefer not to answer
+
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(education_years = case_when(
+    n_6138_2_0 == -7 ~ 7,
+    n_6138_2_0 == 4 ~ 10,
+    n_6138_2_0 == 3 ~ 10,
+    n_6138_2_0 == 2 ~ 13,
+    n_6138_2_0 == 6 ~ 15,
+    n_6138_2_0 == 5 ~ 19,
+    n_6138_2_0 == 1 ~ 20))
+
+
+For now I think this is sufficient and makes sense, although it is to be noted I know very little about UK education levels.
+1/20/22 Updated to use the imaging visit value
+
+```{r}
+
+un_scaled <- un_scaled %>%
+  mutate(education_level = case_when(
+    education_years < 9.8 ~ "<10 years",
+    education_years < 16  ~ "10-16 years (CSEs or O levels and above)",
+    education_years >= 16  ~ ">16 years (college or university degree)"))
+
+```
+
+
+
+
+```{r}
+
+education <- un_scaled %>%
+  group_by(education_level) %>%
+  tally() %>%
+  dplyr::rename("groups" = education_level) %>%
+  mutate(groups = factor(groups, levels = c("<10 years", "10-16 years (CSEs or O levels and above)",
+                                            ">16 years (college or university degree)"))) %>%
+  arrange(groups) %>%
+  filter(! is.na(groups)) %>%
+   mutate(covariate = "Education") %>%
+  relocate(covariate, .before = groups)
+
+
+education
+
+```
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(education$n) == nrow(un_scaled)
+
+```
+
+BMI
+Classification of under / normal / over weight fom here: https://www.ncbi.nlm.nih.gov/books/NBK279167/
+Underweight	< 18.5
+Normal†	18.5–24.9
+Overweight	25.0–29.9
+Obesity	30.0-39.9
+Extreme Obesity	≥ 40
+```{r}
+
+BMI <- un_scaled %>%
+  mutate(groups = case_when(
+    BMI <= 18.5 ~ "<=18.5 (underweight)",
+    BMI <= 24.9 ~ ">18.5 - 24.9 (normal)",
+    BMI <= 29.9 ~ ">24.9 - 29.9 (overweight)",
+    BMI <= 39.9 ~ ">29.9 - 39.9 (obesity)",
+    TRUE ~ ">=40 (extreme obesity)")) %>%
+  select(groups) %>%
+  group_by(groups) %>%
+  tally() %>%
+  mutate(covariate = "BMI") %>%
+  relocate(covariate, .before = groups) %>%
+  mutate(groups = factor(groups, levels = c("<=18.5 (underweight)", ">18.5 - 24.9 (normal)",
+                         ">24.9 - 29.9 (overweight)", ">29.9 - 39.9 (obesity)", ">=40 (extreme obesity)"))) %>%
+  arrange(groups)
+
+BMI
+
+```
+
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(BMI$n) == nrow(un_scaled)
+
+```
+
+Diabetes
+```{r}
+
+diabetes <- un_scaled %>%
+  group_by(diabetes) %>%
+  tally() %>%
+  filter(diabetes == 1) %>%
+  mutate(covariate = "History of diabetes") %>%
+  mutate(groups = "% yes") %>%
+  relocate(n, .after = groups) %>%
+  select(-diabetes)
+
+diabetes
+
+```
+
+SBP:  
+Normal < 120  
+Elevated <= 129  
+High (stage 1) <= 139  
+High (stage 2) > 140 
+```{r}
+
+SBP <- un_scaled %>%
+  mutate(groups = case_when(
+    systolic_BP <= 120 ~ "<=120 (normal)",
+    systolic_BP <= 129 ~ ">120 - 129 (elevated)",
+    systolic_BP <= 139 ~ ">129 - 139 (high, stage 1)",
+    systolic_BP > 139 ~ ">139 (high, stage 2)",
+    TRUE ~ "other")) %>% # number of high BP seems a lot, older population?
+  select(groups) %>%
+  group_by(groups) %>%
+  tally() %>%
+  mutate(covariate = "SBP") %>%
+  relocate(covariate, .before = groups)
+
+SBP
+
+```
+Check that n in data frame adds up to total
+```{r}
+
+sum(SBP$n) == nrow(un_scaled)
+
+```
+
+DBP:  
+Normal / elevated < 80  
+High (stage 1) <= 90  
+High (stage 2) > 90
+
+
+```{r}
+
+DBP <- un_scaled %>%
+  mutate(groups = case_when(
+    diastolic_BP <= 80 ~ "<=80 (normal / elevated)",
+    diastolic_BP <= 90 ~ ">80 - 90 (high, stage 1)",
+    TRUE ~ ">90 (high, stage 2)")) %>%
+  select(groups) %>%
+  group_by(groups) %>%
+  tally() %>%
+  mutate(covariate = "DBP") %>%
+  relocate(covariate, .before = groups)
+
+DBP
+
+```
+
+
+Check that n in data frame adds up to total
+```{r}
+
+sum(DBP$n) == nrow(un_scaled)
+
+```
+
+Stick the tables together to view
+```{r}
+
+demo_table <- demo_table %>%
+  rbind(sex) %>%
+  rbind(age) %>%
+  rbind(ethnicity) %>%
+  rbind(income) %>%
+  rbind(education) %>%
+  rbind(alcohol_status) %>%
+  rbind(dpw) %>%
+  rbind(smoking_status) %>%
+  rbind(pack_years) %>%
+  rbind(BMI) %>%
+  rbind(diabetes) %>%
+  rbind(SBP) %>%
+  rbind(DBP) %>%
+  mutate(percent = n / nrow(un_scaled) * 100) %>%
+  mutate(percent = round(percent))
+
+demo_table
+
+
+```
+
+
+```{r}
+
+demo_table %>%
+  kable(caption = paste0("UK Biobank imaging cohort (N=", nrow(un_scaled), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+  
+
+```
+
+
+Save full demographics
+```{r}
+
+write.csv(demo_table, file = paste0("demographics_full_", Sys.Date(), ".csv"))
+
+```
+
+Abridged demographics for table 1
+Currently only sex, age, race, alcohol, and smoking are mentioned in the main text
+```{r}
+
+demo_table <- demo_table %>%
+  filter(covariate %in% c("N", "Sex", "Age", "Race / ethnicity",
+                          "Alcohol use", "Drinks per week", "Smoking", "Pack years smoking"))
+
+demo_table
+
+write.csv(demo_table, file = paste0("demographics_short_", Sys.Date(), ".csv"))
+
+```
+
+
+

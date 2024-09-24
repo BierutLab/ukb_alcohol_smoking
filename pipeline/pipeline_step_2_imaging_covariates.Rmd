@@ -1,0 +1,275 @@
+---
+title: "Pipeline Step 2 - Imaging Covariates"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is the second step of the pipeline. Using the list of eids that will be included in the final analysis (from step 1 of the pipeline), filter the imaging covariates.
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library(kableExtra) # Run install.packages("kableExtra")
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+Import the imaging covariates and fix the eid to match phenotypes
+Janine sent Yoonhoo an updated imaging covariates file for the 40k subjects in Oct 2021
+
+```{r}
+
+imaging_covariates <- read.table(file = paste0(input_path, "IDP_covariates_45k_01.25.23.csv"), sep = ",", header = TRUE)
+
+```
+
+Fix the eid in the imaging covariates as well, this also does not match the phenotypes
+Use the updated matching file, obtained this from Louis in Sep 2021
+Spring 2024 got a new eid matching text file from Louis, now can match nearly all 42k eid
+
+```{r}
+
+ID_key <- read.table(file = paste0(input_path, "/ukb47267_to_ukb48123_IDs.txt"), sep = " ", header = TRUE)
+
+ID_key <- dplyr::rename(ID_key, pheno_eid = ukb48123_ID_1, eid = ukb47267_ID_1)
+
+```
+
+
+Now join these columns into the imaging covariates over ukb47267_ID_1
+```{r}
+imaging_covariates <- right_join(ID_key, imaging_covariates, by = "eid")
+
+```
+
+```{r}
+imaging_covariates <- imaging_covariates %>%
+  filter(! is.na(pheno_eid))
+
+```
+
+11/4/21 After joining and filtering 36896 patients who can be matched to pheno eids remain
+There are about 100 subjects who are not in the matching document.
+
+Remove the imaging eid (no longer needed) and rename the pheno_eid so it will match the phenotyping and covariates
+
+```{r}
+
+imaging_covariates <- imaging_covariates %>%
+  select(! eid) %>%
+  dplyr::rename("n_eid" = "pheno_eid")
+
+```
+
+Now that the eid are fixed, can filter based on the list of eids from the first step in the pipeline (filtering out withdrawn IDs and filtering based on alcohol phenotype data)
+
+```{r}
+
+load(paste0(output_path, "filtered_eid_p1_", run_date, ".RData"))
+load(paste0(output_path, "n_tracker_p1_", run_date, ".RData"))
+
+```
+
+
+```{r}
+
+imaging_covariates <- imaging_covariates %>%
+  filter(imaging_covariates$n_eid %in% filtered_eid)
+
+```
+
+Now process the imaging covariates so they can be used in regression
+2/3/22 tfMRI REMOVED
+
+```{r}
+
+imaging_covariates <- imaging_covariates %>%
+  dplyr::rename("head_size" = "X25000.2.0") %>%
+  dplyr::rename("self_report_sex" = "X31.0.0") %>%
+  dplyr::rename("age" = "X21003.2.0") %>%
+  dplyr::rename("site" = "X54.2.0") %>%
+  dplyr::rename("date" = "X53.2.0") %>%
+  dplyr::rename("rfMRI_motion" = "X25741.2.0") %>%
+  dplyr::rename("tfMRI_motion" = "X25742.2.0") %>%
+  dplyr::rename("MHQ_date" = "X20400.0.0")
+
+# Select the covariates to include in the analysis
+imaging_covariates <- imaging_covariates %>%
+  select(n_eid, head_size, self_report_sex, age, site, date, rfMRI_motion)
+
+```
+
+Load genetic sex, compare to self report
+```{r}
+
+genetic_sex <- read.csv(paste0(input_path, "genetic_sex_1_31_24.csv"))
+
+genetic_sex <- genetic_sex %>%
+  filter(n_eid %in% filtered_eid) %>%
+  dplyr::rename("genetic_sex" = n_22001_0_0)
+
+
+```
+
+```{r}
+
+genetic_sex %>%
+  left_join(select(imaging_covariates, c(n_eid, self_report_sex)), by = "n_eid") %>%
+  mutate(match = ifelse(genetic_sex == self_report_sex, 1, 0)) %>%
+  group_by(match) %>%
+  tally()
+
+```
+
+23 participants have genetic sex which does not match registry / self reported sex
+We will move forward with genetic sex, but keep in mind this small group who are potentially mis-classified
+```{r}
+
+imaging_covariates <- imaging_covariates %>%
+  left_join(genetic_sex, by = "n_eid") %>%
+  select(-self_report_sex) %>%
+  dplyr::rename("sex" = genetic_sex) %>%
+  relocate(sex, .after = head_size)
+
+```
+
+What imaging sites are represented in our data?
+```{r}
+
+imaging_covariates %>%
+  group_by(site) %>%
+  tally()
+
+```
+11025 = Cheadle
+11026 = Reading
+11027 = Newcastle
+11028 = Bristol
+This is per data coding 10: https://biobank.ndph.ox.ac.uk/showcase/coding.cgi?id=10
+https://biobank.ndph.ox.ac.uk/showcase/field.cgi?id=54
+
+Replace the numeric site code with the site names to make it clear this is a categorical variable
+
+```{r}
+
+imaging_covariates <- imaging_covariates %>%
+  mutate(site = case_when(
+    site == 11025 ~ "cheadle",
+    site == 11026 ~ "reading",
+    site == 11027 ~ "newcastle",
+    site == 11028 ~ "bristol"))
+
+```
+
+
+Convert dates to a numeric. In r this is the number of days since January 1 1970
+https://statistics.berkeley.edu/computing/faqs/dates-and-times-r
+
+```{r}
+imaging_covariates <- imaging_covariates %>%
+  mutate(date = as.Date(date)) %>%
+  mutate(date = as.numeric(date))
+
+#imaging_covariates <- imaging_covariates %>%
+#  mutate(MHQ_date = as.Date(MHQ_date)) %>%
+#  mutate(MHQ_date = as.numeric(MHQ_date))
+
+```
+
+
+
+Check the number of missing observations by imaging covariate
+```{r}
+
+imaging_covariates %>%
+  summarise_at(vars(-n_eid), ~ sum(is.na(.x))) %>%
+  pivot_longer(cols = everything(), names_to = "covariate", values_to = "n_missing") %>%
+  mutate(percent_missing = n_missing / nrow(imaging_covariates) * 100) %>%
+  kable(caption = "Missing Values in Imaging covariates") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+4 participants are missing head size, we drop them as this is a pretty important control
+
+In case this changes drop anyone who is missing imaging covariates, then update the n tracker
+```{r}
+
+imaging_covariates <- na.omit(imaging_covariates)
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Drop missing imaging covariates", "N" = nrow(imaging_covariates)))
+filtered_eid <- imaging_covariates$n_eid
+
+```
+
+
+Initiate the missing report
+Set up a missing report to capture how much data is missing before backfilling and imputation
+```{r}
+
+missing_report <- data.frame("step" = rep("Before", 6),
+                             "data_field" = c("head_size", "sex", "age",  "site", "date","rfMRI_motion"),
+                             "n_missing" = c(sum(is.na(imaging_covariates$head_size)),
+                                             sum(is.na(imaging_covariates$sex)),
+                                             sum(is.na(imaging_covariates$age)),
+                                             sum(is.na(imaging_covariates$site)),
+                                             sum(is.na(imaging_covariates$date)),
+                                             sum(is.na(imaging_covariates$rfMRI_motion))))
+
+```
+
+
+Save the imaging covariates before processing to reference in other scripts
+4/25/24 We take genetic sex in this script, so that is what is passed as "sex" to further scripts
+```{r}
+save(imaging_covariates, file = paste0(output_path, "imaging_covariates_", Sys.Date(), ".RData"))
+
+```
+
+
+7/21/24 big change, no more median and mad
+
+```{r}
+
+imaging_covariates <- imaging_covariates %>%
+  mutate_at(c("head_size", "age", "date", "rfMRI_motion"), ~scale(.x, center = TRUE, scale = TRUE))
+
+```
+
+Save the processed covariates for use in regression
+
+```{r}
+
+save(imaging_covariates, file = paste0(output_path, "processed_imaging_covariates_", Sys.Date(), ".RData"))
+save(filtered_eid, file = paste0(output_path, "filtered_eid_p2_", Sys.Date(), ".RData"))
+save(n_tracker, file = paste0(output_path, "n_tracker_p2_", Sys.Date(), ".RData"))
+save(missing_report, file = paste0(output_path, "missing_report_p2_", Sys.Date(), ".RData"))
+
+```
+
+
+```{r}
+
+print(paste0("Script last run ", Sys.Date()))
+
+```
+
+
+

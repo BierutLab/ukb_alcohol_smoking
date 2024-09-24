@@ -1,0 +1,819 @@
+---
+title: "Pipeline Step 1 - Filter participants and import imaging data"
+output:
+  html_document:
+    df_print: paged
+---
+
+This script requires UKB data, check that your column naming convention matches the script.
+
+In this script the imaging data (as IDPs) is imported and participants are filtered for inclusion in the analysis.
+Participants are excluded for:
+Not being matched to a pheno ID
+Indicated they want to withdraw from a study
+Don't have genetic PCs
+Have a neurological diagnosis which could affect their imaging
+Are a 3rd degree or closer relative of someone else in the study (which one out of a relative pair is retained is random)
+
+
+Not all participants have all MRI sequences, so the IDPs are split by sequence and participants are dropped from the set if they are missing the sequence.
+
+
+I added sections to make tables of N and missing data so that can be monitored on every run through the pipeline
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library(kableExtra) # Run install.packages("kableExtra")
+library(viridis)
+library(forcats)
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+Initialize a table to track N as the data set is processed
+```{r}
+
+n_tracker <- data.frame(matrix(ncol = 2, nrow = 0))
+colnames(n_tracker) <- c("Step", "N")
+
+```
+
+Import imaging data
+Import the imaging data
+
+Import the file of IDPs
+Updated .csv with 45k participant from Janine via Yoonhoo on 3/7/23
+
+```{r}
+
+ukbio_IDP <- read.csv(file = paste0(input_path, "45k_IDP_visit1_3-7-23.csv"))
+
+```
+
+Capture n in the full imaging set
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Imaging cohort", "N" = nrow(ukbio_IDP)))
+
+```
+
+Stitch in the rfMRI ICAs (also have the imaging ID)
+```{r}
+
+rfMRI_ICA <- read.table(file = paste0(input_path, "subs_netica.txt"), sep = ",", header = FALSE)
+
+# Do some renaming, the first column is the subject IDs
+rfMRI_ICA <- rfMRI_ICA %>%
+  dplyr::rename("eid" = V1, "ICA1" = V2, "ICA2" = V3, "ICA3" = V4, "ICA4" = V5, "ICA5" = V6, "ICA6" = V7)
+
+```
+
+```{r}
+
+ukbio_IDP <- left_join(ukbio_IDP, rfMRI_ICA, by = "eid")
+
+```
+
+
+Replace the imaging eid with the phenotype eid so they will match all the way through
+On 7/30/21 Yoonhoo emailed me a text file that matches one to the other. Import this and convert the IDs.
+
+On 8/30/21 we got an expanded imaging data set from Janine.
+Louis was able to get a new matching file that includes more of the new imaging participants.
+
+The column entitled ukb47267_ID_1 contains the IDs present in the imaging set.
+The column ukb48123_ID_1 is the IDs in the phenotype set.
+
+Spring 2024 got a new eid matching text file from Louis, now can match nearly all 42k eid
+
+```{r}
+
+ID_key <- read.table(file = paste0(input_path, "/ukb47267_to_ukb48123_IDs.txt"), sep = " ", header = TRUE)
+
+ID_key <- dplyr::rename(ID_key, pheno_eid = ukb48123_ID_1, eid = ukb47267_ID_1)
+
+```
+
+
+Now join these columns into the imaging data over ukb47267_ID_1 (eid)
+```{r}
+ukbio_IDP <- right_join(ID_key, ukbio_IDP, by = "eid")
+
+```
+
+
+Filter out the patients who are missing an eid - we cannot match them to the phenotypes
+```{r}
+
+ukbio_IDP <- ukbio_IDP %>%
+  filter(! is.na(pheno_eid))
+
+```
+
+After performing this step 36896 observations remain in the imaging data set.
+Update the n tracker
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Matched phenotype eid", "N" = nrow(ukbio_IDP)))
+
+```
+
+Remove the imaging eid (no longer needed) and rename the pheno_eid so it will match the phenotyping and covariates
+
+```{r}
+
+ukbio_IDP <- ukbio_IDP %>%
+  select(! eid) %>%
+  dplyr::rename("n_eid" = "pheno_eid")
+
+```
+
+Filter out withdrawn participants
+Got a new list of withdrawn participants in Sep 2023
+UKB_withdrawn_9-5-23
+```{r}
+
+withdrawn_ID <- read.csv(paste0(input_path, "UKB_withdrawn_9-5-23.csv"))
+ukbio_IDP <- ukbio_IDP %>%
+  filter(! ukbio_IDP$n_eid %in% withdrawn_ID$X1038692)
+
+```
+
+Save the n
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Withdrawn removed", "N" = nrow(ukbio_IDP)))
+
+```
+
+
+================Remove participants with neurological disease===========================================
+
+4/29/22 Had been using strategy of removing all participants with any IDP an outlier by >4 SD
+Checked this against known neuro disease, it only catches 30% of participants with known disease
+While also removing 30% of the sample
+Decided to simply use the diagnosis codes from data field 20002 to filter out participants and leave the outliers alone
+
+Assess how many participants are >4 SD outliers, and how many have a neurological disease diagnosis
+
+6/15/23 Include the disease list from both baseline and imaging appointments, they are different
+Participants filtered out if the disease is reported at any appointment
+
+```{r}
+
+disease_baseline <- read.csv(paste0(input_path, "disease_baseline_6_13_23.csv"))
+disease_imaging <- read.csv(paste0(input_path, "disease_imaging_6_13_23.csv"))
+
+```
+
+These data fields include all disease codes, although we are using them to filter for neurological disease only
+
+Combine baseline and imaging, filter for only the people in our imaging cohort
+```{r}
+
+all_disease <- disease_baseline %>%
+  left_join(disease_imaging, by = "n_eid") %>%
+  filter(n_eid %in% ukbio_IDP$n_eid)
+
+```
+
+
+Make a list of codes for neurological diseases that might impact brain structure
+I referenced the Palmer paper (Gray 2020) as a starting point
+
+Dementia = 1263
+Parkinsons = 1262
+Chronic degenerative neurological = 1258
+Guillan-Barre syndrome = 1256
+Multiple sclerosis = 1261
+Other demyelinating disease = 1397
+Stroke or ischaemic stroke = 1081
+Brain cancer = 1032
+Brain hemorrhage = 1491
+Brain / intracranial abcess = 1245
+Cerebral aneurysm = 1425
+Cerebral palsy = 1433
+Encephalitis = 1246
+Epilepsy = 1264
+Head injury = 1266
+Nervous system infection = 1244
+Ischaemic stroke = 1583
+Meningeal cancer = 1031
+Meningioma = 1659
+Meningitis = 1247
+Motor neuron disease = 1259
+Neurological disease / trauma = 1240
+Spina bifida = 1524
+Subdural hematoma = 1083
+Subarachnoid hemorrhage = 1086
+Transient ischemic attack = 1082
+
+
+```{r}
+
+neuro_codes <- data.frame((rbind(
+  c("Dementia / Alzheimers", 1263),
+  c("Parkinsons", 1262),
+  c("Chronic degenerative neurological", 1258),
+  c("Guillan-Barre syndrome", 1256),
+  c("Multiple sclerosis", 1261),
+  c("Other demyelinating disease", 1397),
+  c("Stroke or ischaemic stroke", 1081),
+  c("Brain cancer", 1032),
+  c("Brain hemorrhage", 1491),
+  c("Brain / intracranial abscess", 1245),
+  c("Cerebral aneurysm", 1425),
+  c("Cerebral palsy", 1433),
+  c("Encephalitis", 1246),
+  c("Epilepsy", 1264),
+  c("Head injury", 1266),
+  c("Nervous system infection", 1244),
+  c("Ischaemic stroke", 1583),
+  c("Meningeal cancer", 1031),
+  c("Meningioma", 1659),
+  c("Meningitis", 1247),
+  c("Motor neuron disease", 1259),
+  c("Neurological disease / trauma", 1240),
+  c("Spina bifida", 1524),
+  c("Subdural hematoma", 1083),
+  c("Subarachnoid hemorrhage", 1086),
+  c("Transient ischemic attack", 1082))))
+
+neuro_codes <- neuro_codes %>%
+  dplyr::rename("condition" = X1, "code" = X2) %>%
+  mutate(code = formatC(code, format = "d"))
+
+```
+
+Use the table of neuro codes to construct a table for neuro disease
+```{r}
+
+neuro_disease <- all_disease %>%
+  pivot_longer(cols = -n_eid, names_to = "field", values_to = "code") %>%
+  select(-field) %>%
+  filter(! is.na(code)) %>%
+  # Remove any duplicates due to data from both the baseline and imaging visits
+  distinct(.keep_all = TRUE) %>%
+  mutate(code = formatC(code, format = "d")) %>%
+  filter(code %in% neuro_codes$code) %>%
+  left_join(neuro_codes, by = "code")
+
+```
+
+Capture how many in our cohort have an unclassifiable illness
+```{r}
+
+unclassifiable <- all_disease %>%
+  pivot_longer(cols = -n_eid, names_to = "field", values_to = "code") %>%
+  select(-field) %>%
+  filter(! is.na(code)) %>%
+  # Remove any duplicates due to data from both the baseline and imaging visits
+  distinct(.keep_all = TRUE) %>%
+  mutate(code = formatC(code, format = "d")) %>%
+  filter(code %in% "99999")
+
+n_unclassifiable <- nrow(unclassifiable)
+  
+unclassifiable <- data.frame(
+  "condition" = c("Unclassified illness (neuro and all other)"),
+  "code" = c("99999"),
+  "n" = c(n_unclassifiable),
+  "percent" = c(formatC(n_unclassifiable / nrow(ukbio_IDP) * 100, digits = 2, format = "f")))
+
+unclassifiable
+
+```
+
+About 10% have an unclassified illness (could be anything, cardiac, liver, etc). Not adding this to the neuro disease table because this number includes ALL diseases, not just ones that are neuroligical in nature and thus relevant to us. Consider the number of neuro conditions listed relative to all possible conditions given in data coding 6.
+
+
+Use the table to tally up how many total individuals are affected, and which diseases
+
+```{r}
+
+neuro_disease_table <- neuro_disease %>%
+  group_by(condition) %>%
+  tally() %>%
+  left_join(neuro_codes, by = "condition") %>%
+  relocate(code, .before = n) %>%
+  mutate(percent = n / nrow(ukbio_IDP) * 100) %>%
+  mutate(percent = formatC(percent, digits = 2, format = "f")) %>%
+  arrange(desc(n))
+
+neuro_disease_table %>%
+  kable(caption = paste0("Prevalence of neurological conditions in Imaging cohort\nN=",
+                         nrow(ukbio_IDP), ", N affected=", length(unique(neuro_disease$n_eid)))) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+Save the neuro disease table, it will go in the supplemental info
+```{r}
+
+save(neuro_disease_table, file = paste0(output_path, "neuro_disease_table_", Sys.Date(), ".RData"))
+
+```
+
+
+Use the eids in the neuro_disease table to filter out participants with a diagnosis of neurological disease
+
+```{r}
+
+ukbio_IDP <- ukbio_IDP %>%
+  filter(! n_eid %in% neuro_disease$n_eid)
+
+```
+
+Update the N tracker
+
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Neuro diagnosis removed", "N" = nrow(ukbio_IDP)))
+
+```
+
+Filter for relatedness=============================================================================
+
+Import the relatedness matrix
+Got this from the database - it was uploaded by Louis
+```{r}
+
+relatedness <- read.delim(file = paste0(input_path, "ukb48123_rel_s488285.dat"), header = TRUE, sep=" ")
+
+```
+
+Per Bycroft 2018 Supplemental Info, 1st degree relatives have an expected kinship coefficient of 1/4
+2nd degree = 1/8
+3rd degree = 1/16
+Set the minimum kinship coefficient to 1/16th and then filter the relationship matrix for 1/6 or greater
+This is a stochastic probability so I set it slightly under 1/16th to capture these
+
+The ukbtools function to accomplish this sets a larger cutoff for related-ness
+Currently reading about why this is so
+
+```{r}
+
+kinship_coeff = 1/20
+
+relatedness <- relatedness %>%
+  filter(Kinship > kinship_coeff)
+
+```
+
+This reduces the number of entries in the kinship matrix down to 92825
+
+Filter again for eid in the imaging set
+We only care about pairs where both are in the imaging data
+When one member of a pair did not, happy day no conflict!
+
+```{r}
+
+relatedness <- relatedness %>%
+  filter(relatedness$ID1 %in% ukbio_IDP$n_eid)
+
+relatedness <- relatedness %>%
+  filter(relatedness$ID2 %in% ukbio_IDP$n_eid)
+
+```
+
+886 pairs of 3rd degree or closer relatives in the imaging set
+
+For selecting which members to retain, I am implementing the algorithm used in the ukbiotools package by Ken Hanscombe
+Description of the algorithm:
+1) Remove pairs with kinship coefficient less than 3rd degree (already done)
+2) Count number of connections each participant has, add the one with the most connections to "samples to exclude"
+  - accomplish this with a while loop
+3) Repeat step 2 until all participants have only 1 connection, then randomly select one member of the pairs to add to "samples to exclude"
+
+
+```{r}
+
+keep_list = c()
+remove_list = c()
+
+done = FALSE
+while (! done) {
+remove_ID <- relatedness %>%
+  select(ID1, ID2) %>%
+  pivot_longer(everything(), names_to = "colname", values_to = "ID") %>%
+  group_by(ID) %>%
+  tally() %>%
+  arrange(desc(n)) %>%
+  utils::head(n = 1)
+
+if (remove_ID$n > 1) {
+  # Add the highly connected ID to the remove list
+  remove_list <- append(remove_list, remove_ID$ID)
+  
+  # Filter the highly connected ID out of the relationship matrix
+  relatedness <- relatedness %>%
+    filter(! (ID1 == remove_ID$ID)) %>%
+    filter(! (ID2 == remove_ID$ID))
+}  else {
+  done = TRUE
+}
+}
+
+```
+
+All highly connected eIDs are now removed.
+Randomly assign the remaining IDs to remove
+```{r}
+
+for (i in 1:nrow(relatedness)) {
+  if (i %% 2 == 1) {
+    remove_list <- append(remove_list, relatedness[i,]$ID1)
+  } else
+    remove_list <- append(remove_list, relatedness[i,]$ID2)
+}
+
+```
+
+Use the remove list to filter the imaging set
+
+```{r}
+
+ukbio_IDP <- ukbio_IDP %>%
+  filter(! ukbio_IDP$n_eid %in% remove_list)
+
+```
+
+Save the n after filtering
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Related removed", "N" = nrow(ukbio_IDP)))
+
+```
+
+
+======Handle missing data in the imaging IDPs and normalize================================================
+
+Import the IDP names file to allow exploring the IDPs by MRI type, etc.
+```{r}
+
+load(paste0(output_path, "IDP_names_table_", run_date, ".RData"))
+
+```
+
+
+Filter for only the IDPs that are part of this analysis
+Defining a "keep" column and filtering on that is the most consistent way to select all the correct IDPs
+```{r}
+
+IDP_name_table <- IDP_name_table %>%
+  # Define what to keep
+  mutate(keep = case_when(
+    # 6 rfMRI ICs
+    MRI == "rfMRI" ~ 1,
+    
+    # Remove QC measures
+    MRI == "QC" ~ 0,
+    region == "QC" ~ 0,
+    
+    # Fix some specific cases
+    numeric_IDP <= 25010 ~ 0,
+    IDP == "X26568.2.0" ~ 0, # QC measure for aseg
+    IDP == "X26599.2.0" ~ 0, # QC measure for aseg
+    
+    # Select which global measures are reported and remove others
+    IDP == "X26514.2.0" ~ 1, # total brain volume
+    IDP == "X26518.2.0" ~ 1, # total grey matter volume
+    IDP == "total_wm" ~ 1, # total white matter volume
+    IDP == "X26527.2.0" ~ 1, # total CSF volume
+    IDP == "X26528.2.0" ~ 0, # volume of white matter hypOintensities
+    IDP == "X25781.2.0" ~ 0, # volume of white matter hypERintensities
+    region == "global" ~ 0,
+    
+    # Remove from ASEG regions which are mis-classified
+    IDP %in% c("X26548.2.0", "X26579.2.0") ~ 0,
+    
+    # Address general groups
+    dimension == "mean_intensity" ~ 0,
+    
+    map == "FAST" ~ 0,
+    region == "cerebellum" ~ 1, # Ensure cerebellum volumes are included
+    
+    map == "freesurfer_ASEG" ~ 1,
+    map == "freesurfer_DKT" ~ 1,
+    MRI == "T2" ~ 1,
+    map == "skeleton" ~ 0,
+    dMRI == "FA" ~ 1,
+    dMRI == "MD" ~ 1,
+    dMRI == "ICVF" ~ 1,
+    dMRI == "ISOVF" ~ 1,
+    TRUE ~ 0)) %>%
+  # Filter out the IDPs we are not looking at in this analysis
+  filter(keep == 1)
+
+```
+
+The IDPs with mis-classified dimension:
+X26548.2.0	Mean intensity of Accumbens-area (left hemisphere)			
+X26564.2.0	Volume of Accumbens-area (left hemisphere)			
+X26579.2.0	Mean intensity of Accumbens-area (right hemisphere)			
+X26595.2.0	Volume of Accumbens-area (right hemisphere)
+
+Temp fix for this
+```{r}
+
+IDP_name_table <- IDP_name_table %>%
+  mutate(dimension = ifelse(IDP %in% c("X26564.2.0", "X26595.2.0"), "volume", dimension))
+
+```
+
+
+Calculate total WM from right and left white matter volume from ASEG
+total_wm = X26553.2.0 + X26584.2.0
+```{r}
+
+ukbio_IDP <- ukbio_IDP %>%
+  mutate(total_wm = X26553.2.0 + X26584.2.0)
+
+```
+
+
+Select IDPs from the keep list for further processing
+```{r}
+
+ukbio_IDP <- ukbio_IDP %>%
+  select(c(n_eid, all_of(IDP_name_table$IDP)))
+
+```
+
+
+What IDPs are now left in ukbio IDP?
+```{r}
+
+IDP_tally <- data.frame("IDP" = colnames(ukbio_IDP)[! colnames(ukbio_IDP) == "n_eid"]) %>%
+  left_join(IDP_name_table, by = "IDP") %>%
+  mutate(group = ifelse(IDP %in% c("X26514.2.0", "X26518.2.0", "total_wm", "X26527.2.0", "X26528.2.0"), "global", "regional")) %>%
+  group_by(MRI, map, dimension, dMRI, group) %>%
+  tally() %>%
+  mutate(MRI = factor(MRI, levels = c("T1", "T2", "rfMRI", "dMRI"))) %>%
+  arrange(MRI) %>%
+  arrange(group)
+
+IDP_tally %>%
+  kable()
+
+
+```
+
+Save the IDP tally
+```{r}
+
+save(IDP_tally, file = paste0(output_path, "IDP_tally_p1_", Sys.Date(), ".RData"))
+
+```
+
+Get a list of the IDP names
+```{r}
+
+IDP_all_names <- colnames(ukbio_IDP)[! colnames(ukbio_IDP) == "n_eid"]
+
+```
+
+
+Create a table to display the number missing and how that compares as a percentage of the total data
+```{r}
+
+image_missing <- ukbio_IDP %>%
+  summarise_at(vars(all_of(IDP_all_names)), ~ sum(is.na(.x))) %>%
+  pivot_longer(cols = everything(), names_to = "IDP", values_to = "n_missing") %>%
+  mutate(percent_missing = n_missing / nrow(ukbio_IDP) * 100) %>%
+  left_join(IDP_name_table, by = "IDP")
+  
+```
+
+Plot the percent missing by MRI type
+
+```{r}
+
+image_missing %>%
+  mutate(MRI = ifelse(MRI == "T1", ifelse(map == "global" | map == "FIRST", "T1 global / FIRST",
+                                          ifelse(map == "FAST", "T1 FAST", "T1 regional")), MRI)) %>%
+  mutate(MRI = fct_reorder(MRI, -percent_missing)) %>%
+  ggplot(aes(x = reorder(IDP, -percent_missing), y = percent_missing, color = MRI)) +
+  geom_point() +
+  ggtitle(paste0("Missing values per IDP as Percent of N (N=", nrow(ukbio_IDP), ")")) +
+  xlab(paste0("IDP (IDPs =", nrow(image_missing), ")")) +
+  ylab("Percent of observations") +
+  ylim(c(0, 8))
+
+```
+
+Group by MRI type and display % missing
+
+```{r}
+
+image_missing %>%
+  mutate(MRI = ifelse(IDP == "X25781.2.0", "total_hyperintensities", MRI)) %>%
+  group_by(MRI, map) %>%
+  summarise(percent_missing = mean(percent_missing)) %>%
+  arrange(desc(percent_missing)) %>%
+  mutate(percent_missing = formatC(percent_missing, digits = 3, format = "f")) %>%
+  kable(caption = paste0("Missing values per MRI Category as Percent of N (N=", nrow(ukbio_IDP), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+  
+
+```
+
+
+Participants who are missing all values for a given MRI category should not be included in normalization / regression for that category
+Grouping the IDPs for regression analysis achieves 2 purposes:
+Maximize N by only dropping participants from sequences they are actually missing
+Break up the data set so you can run the regression on your crappy laptop without crashing it should you desire to do that
+
+X26514.2.0 = total brain volume
+X26518.2.0 = total grey matter volume
+total_wm = total white matter volume
+X26527.2.0 = total CSF volume
+
+Also including IDP derived measures
+```{r}
+
+total_volume_IDPs <- c("X26514.2.0", "X26518.2.0", "X26527.2.0", "total_wm")
+
+```
+
+
+```{r}
+
+T1 <- IDP_name_table %>%
+  filter(MRI == "T1") %>%
+  filter(! IDP %in% total_volume_IDPs) %>%
+  pull(IDP)
+
+length(T1)
+
+```
+
+Select T2 with the exception of total hyperintensities (X25781.2.0)
+
+```{r}
+
+T2 <- IDP_name_table %>%
+  filter(MRI == "T2") %>%
+  filter(! IDP == "X25781.2.0") %>%
+  filter(! IDP %in% total_volume_IDPs) %>%
+  pull(IDP)
+
+length(T2)
+
+```
+
+```{r}
+
+dMRI <- IDP_name_table %>%
+  filter(MRI == "dMRI") %>%
+  filter(! IDP %in% total_volume_IDPs) %>%
+  pull(IDP)
+length(dMRI)
+
+```
+
+```{r}
+
+rfMRI <- IDP_name_table %>%
+  filter(MRI == "rfMRI") %>%
+  pull(IDP)
+
+length(rfMRI)
+
+```
+
+Check that the number of IDPs in the individual vectors matches the total
+
+```{r}
+
+print(sum(length(total_volume_IDPs), length(T1), length(T2), length(dMRI), length(rfMRI)))
+
+```
+Now break the imaging set into subsets based on the IDPs
+
+```{r}
+
+total_volumes <- ukbio_IDP %>%
+  select(c(n_eid, all_of(total_volume_IDPs)))
+
+T1 <- ukbio_IDP %>%
+  select(c(n_eid, all_of(T1)))
+
+T2 <- ukbio_IDP %>%
+  select(c(n_eid, all_of(T2)))
+
+dMRI <- ukbio_IDP %>%
+  select(c(n_eid, all_of(dMRI)))
+
+rfMRI <- ukbio_IDP %>%
+  select(c(n_eid, all_of(rfMRI)))
+
+```
+
+Filter each subset to remove participants who are missing data
+
+```{r}
+
+total_volumes <- na.omit(total_volumes)
+T1 <- na.omit(T1)
+T2 <- na.omit(T2)
+dMRI <- na.omit(dMRI)
+rfMRI <- na.omit(rfMRI)
+
+```
+
+Add rows to the N tracker
+
+```{r}
+
+MRI_types <- c("total_volumes", "T1", "T2", "dMRI", "rfMRI")
+
+MRI_n_tracker <- data.frame("Step" = rep("MRI missing dropped", length(MRI_types)),
+            "MRI" = MRI_types,
+           "N" = c(nrow(total_volumes), nrow(T1), nrow(T2), nrow(dMRI), nrow(rfMRI)))
+
+MRI_n_tracker
+
+```
+############################## Scale IDPs
+
+Scale all the IDP tables (not total volume though)
+```{r}
+
+T1 <- mutate_at(T1, vars(-n_eid), ~scale(.x, center = TRUE, scale = TRUE))
+T2 <- mutate_at(T2, vars(-n_eid), ~scale(.x, center = TRUE, scale = TRUE))
+dMRI <- mutate_at(dMRI, vars(-n_eid), ~scale(.x, center = TRUE, scale = TRUE))
+rfMRI <- mutate_at(rfMRI, vars(-n_eid), ~scale(.x, center = TRUE, scale = TRUE))
+
+# Total volumes are NOT scaled (except dMRI measures), this way the output is in mm3 and more interpertable
+
+```
+
+After performing this transformation using mutate_at and scale, I checked the results for column X25011.2.0 by doing the calculation in excel. The column values match as of 9/20/21.
+12/11/21 Also checked the results for the global columns after adding these.
+
+#########Removal of outliers was here, final decision to drop this step after meeting with Janine on 5/20/22
+
+Save the filtered and normalized IDPs tables
+```{r}
+
+save(T1, file = paste0(output_path, "T1_", Sys.Date(), ".RData"))
+save(T2, file = paste0(output_path, "T2_", Sys.Date(), ".RData"))
+save(dMRI, file = paste0(output_path, "dMRI_", Sys.Date(), ".RData"))
+save(rfMRI, file = paste0(output_path, "rfMRI_", Sys.Date(), ".RData"))
+
+save(total_volumes, file = paste0(output_path, "total_volumes_", Sys.Date(), ".RData"))
+
+```
+
+Save the list of eid
+```{r}
+
+filtered_eid <- ukbio_IDP$n_eid
+save(filtered_eid, file = paste0(output_path, "filtered_eid_p1_", Sys.Date(), ".RData"))
+
+```
+
+
+Save and view the n tracker
+```{r}
+
+save(n_tracker, file = paste0(output_path, "n_tracker_p1_", Sys.Date(), ".RData"))
+save(MRI_n_tracker, file = paste0(output_path, "MRI_n_tracker_", Sys.Date(), ".RData"))
+
+MRI_n_tracker %>%
+  pivot_wider(id_cols = MRI, names_from = Step, values_from = N) %>%
+  mutate(across(everything(), ~formatC(.x, format = "d"))) %>%
+  mutate(across(everything(), ~gsub("NA", "", .x))) %>%
+  kable(caption = paste0("N Remaining by Processing Step")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+
+```
+
+
+```{r}
+
+print(paste0("Script last run ", Sys.Date()))
+
+```
+
+

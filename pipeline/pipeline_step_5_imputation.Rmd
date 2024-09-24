@@ -1,0 +1,834 @@
+---
+title: "Pipeline Step 5 - Covariates, backfilling, and imputation"
+output:
+  html_document:
+    df_print: paged
+---
+
+Load all covariates that are not alcohol and smoking, preprocess as needed, determine rates of missing data, backfill missing values from the imaging visit with the baseline visit, and do imputation.
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+library(mice)
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+Load eid, missing report, alcohol, smoking, and imaging covariates (not the processed ones)
+```{r}
+
+load(paste0(output_path, "filtered_eid_p2_", run_date, ".RData"))
+load(paste0(output_path, "missing_report_p4_", run_date, ".RData"))
+load(paste0(output_path, "imaging_alcohol_", run_date, ".RData"))
+load(paste0(output_path, "baseline_smoking_", run_date, ".RData"))
+load(paste0(output_path, "imaging_smoking_", run_date, ".RData"))
+load(paste0(output_path, "imaging_covariates_", run_date, ".RData"))
+
+```
+
+4/25/24 Note that "sex" in imaging covariates comes from Data field 22001 Genetic sex
+
+
+Import the non-imaging covariates
+Updated non-imaging covariates on 1/19/22
+Updated and added waist / hip ratio on 3/14/22
+Added stress (6145), physical activity (884 and 904), diabetes (2443), vascular / heart (6150), cancer (2453), other diagnoses (2473) on 6/27/23
+
+1/2/24 Will use stroke from health status rather than vascular / heart
+```{r}
+
+non_imaging_covariates <- read.csv(paste0(input_path, "non_imaging_covariates_6_27_23.csv"))
+
+```
+
+
+Filter the non-imaging covariates by eid for those that will be included in regression
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  filter(non_imaging_covariates$n_eid %in% filtered_eid)
+
+```
+
+DIABETES
+Diabetes (Data field 2443)
+"Has a doctor ever told you that you have diabetes?"
+Data coding 100349 (for data field 2443)
+1	Yes
+0	No
+-1	Do not know
+-3	Prefer not to answer
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  # Replace invalid responses with NA, -1 and -3 are invalid
+  mutate_at(vars(n_2443_2_0, n_2443_0_0), ~ifelse(.x < 0, NA, .x)) %>%
+  dplyr::rename("diabetes" = n_2443_2_0)
+
+```
+
+BMI
+Already a continuous numeric, no major processing
+Check that range makes sense
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  dplyr::rename("BMI" = n_21001_2_0)
+
+min(non_imaging_covariates$BMI, na.rm = TRUE)
+max(non_imaging_covariates$BMI, na.rm = TRUE)
+
+```
+
+BLOOD PRESSURE
+3/19/22 Added systolic BP
+
+```{r}
+
+missing_report <- rbind(missing_report, data.frame("step" = "Import", "data_field" = c("diastolic_BP", "systolic_BP"),
+                             "n_missing" = c(sum(is.na(non_imaging_covariates$n_4079_2_0)),
+                                             sum(is.na(non_imaging_covariates$n_4080_2_0)))))
+
+```
+
+Diastolic  BP
+Data field 4079 is the machine blood pressure. When this could not be taken for any reason, a manual BP was obtained.
+When the machine BP is missing, replace with the manual value
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(diastolic_BP = ifelse(is.na(n_4079_2_0), n_94_2_0, n_4079_2_0)) %>%
+  mutate(baseline_DBP = ifelse(is.na(n_4079_0_0), n_94_0_0, n_4079_0_0))
+
+```
+
+Systolic BP
+Data field 4080 = machine, 93 = manual
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(systolic_BP = ifelse(is.na(n_4080_2_0), n_93_2_0, n_4080_2_0)) %>%
+  mutate(baseline_SBP = ifelse(is.na(n_4080_0_0), n_93_0_0, n_4080_0_0))
+
+```
+
+
+Update the number of BP measures missing for the imaging visit
+
+```{r}
+
+missing_report <- rbind(missing_report, data.frame("step" = "Manual BP", "data_field" = c("diastolic_BP", "systolic_BP"),
+                             "n_missing" = c(sum(is.na(non_imaging_covariates$diastolic_BP)),
+                             sum(is.na(non_imaging_covariates$systolic_BP)))))
+
+```
+
+
+EDUCATION
+
+At one point we were using the "age completed education" variable but this was not collected for anyone with a college degree.
+The data for education credentials is MUCH more complete.
+How to convert these to numeric values for inclusion in regression? Years of education represented by the qualification is a good conversion.
+
+For the non college folks, how well does the age completed education fill in the number of years they spent in school?
+Per Zhou 2021, this can be done by comparing to International Standard Classification of Education
+This conversion is spelled out in the supplementary info for the paper.
+
+None of the above (no qualifications) = 7 years
+CSEs or equivalent = 10 years
+O levels/GCSEs or equivalent = 10 years
+A levels/AS levels or equivalent = 13 years
+Other professional qualification = 15 years
+NVQ or HNC or equivalent = 19 years
+College or university degree = 20 years
+
+6/27/23 UKB added Data coding 100305
+1	College or University degree
+2	A levels/AS levels or equivalent
+3	O levels/GCSEs or equivalent
+4	CSEs or equivalent
+5	NVQ or HND or HNC or equivalent
+6	Other professional qualifications eg: nursing, teaching
+-7	None of the above
+-3	Prefer not to answer
+
+
+For now I think this is sufficient and makes sense, although it is to be noted I know very little about UK education levels.
+1/20/22 Updated to use the imaging visit value
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(education_years = case_when(
+    n_6138_2_0 == -7 ~ 7,
+    n_6138_2_0 == 4 ~ 10,
+    n_6138_2_0 == 3 ~ 10,
+    n_6138_2_0 == 2 ~ 13,
+    n_6138_2_0 == 6 ~ 15,
+    n_6138_2_0 == 5 ~ 19,
+    n_6138_2_0 == 1 ~ 20))
+
+
+```
+
+Convert the baseline as well for backfilling
+
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(baseline_education = case_when(
+    n_6138_0_0 == -7 ~ 7,
+    n_6138_0_0 == 4 ~ 10,
+    n_6138_0_0 == 3 ~ 10,
+    n_6138_0_0 == 2 ~ 13,
+    n_6138_0_0 == 6 ~ 15,
+    n_6138_0_0 == 5 ~ 19,
+    n_6138_0_0 == 1 ~ 20))
+
+```
+
+
+INCOME (Data field 738)
+Data coding 100294
+1	Less than 18,000
+2	18,000 to 30,999
+3	31,000 to 51,999
+4	52,000 to 100,000
+5	Greater than 100,000
+-1	Do not know
+-3	Prefer not to answer
+
+Convert the income into ordered numeric values by taking the lower bound of each income range
+
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(income = case_when(
+    n_738_2_0 == 1 ~ 0,
+    n_738_2_0 == 2 ~ 18000,
+    n_738_2_0 == 3 ~ 31000,
+    n_738_2_0 == 4 ~ 52000,
+    n_738_2_0 == 5 ~ 100000))
+# Do not know, prefer not to answer, and missing all converted to NA
+
+```
+
+Repeat with the baseline
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(baseline_income = case_when(
+    n_738_0_0 == 1 ~ 0,
+    n_738_0_0 == 2 ~ 18000,
+    n_738_0_0 == 3 ~ 31000,
+    n_738_0_0 == 5 ~ 52000,
+    n_738_0_0 == 5 ~ 100000))
+
+```
+
+
+Backfill all the non-imaging covariates (except for smoking, that is the next step)
+Get counts of missing in all the imaging covariates
+
+```{r}
+
+missing_report <- rbind(missing_report, data.frame("step" = rep("Before", 6),
+            "data_field" = c("diabetes", "BMI", "diastolic_BP", "systolic_BP", "education", "income"),
+                            "n_missing" = c(sum(is.na(non_imaging_covariates$diabetes)),
+                                            sum(is.na(non_imaging_covariates$BMI)),
+                                            sum(is.na(non_imaging_covariates$diastolic_BP)),
+                                            sum(is.na(non_imaging_covariates$systolic_BP)),
+                                            sum(is.na(non_imaging_covariates$education_years)),
+                                            sum(is.na(non_imaging_covariates$income)))))
+
+```
+
+Backfill with values from the baseline survey
+```{r}
+
+non_imaging_covariates <- non_imaging_covariates %>%
+  mutate(diabetes = ifelse(is.na(diabetes), n_2443_0_0, diabetes)) %>%
+  mutate(BMI = ifelse(is.na(BMI), n_21001_0_0, BMI)) %>%
+  mutate(diastolic_BP = ifelse(is.na(diastolic_BP), baseline_DBP, diastolic_BP)) %>%
+  mutate(systolic_BP = ifelse(is.na(systolic_BP), baseline_SBP, systolic_BP)) %>%
+  mutate(education_years = ifelse(is.na(education_years), baseline_education, education_years)) %>%
+  mutate(income = ifelse(is.na(income), baseline_income, income))
+  
+```
+
+
+```{r}
+
+missing_report <- rbind(missing_report, data.frame("step" = rep("After", 6),
+            "data_field" = c("diabetes", "BMI", "diastolic_BP", "systolic_BP", "education", "income"),
+                            "n_missing" = c(sum(is.na(non_imaging_covariates$diabetes)),
+                                            sum(is.na(non_imaging_covariates$BMI)),
+                                            sum(is.na(non_imaging_covariates$diastolic_BP)),
+                                            sum(is.na(non_imaging_covariates$systolic_BP)),
+                                            sum(is.na(non_imaging_covariates$education_years)),
+                                            sum(is.na(non_imaging_covariates$income)))))
+
+```
+
+Make a nice figure of the missing report to see the effect of backfilling
+```{r}
+
+missing_report %>%
+  pivot_wider(id_cols = data_field, names_from = step, values_from = n_missing) %>%
+  mutate(percent_baseline = (Before - After) / nrow(non_imaging_covariates) * 100) %>%
+  mutate(across(-percent_baseline, ~formatC(.x, format = "d"))) %>%
+  mutate(across(percent_baseline, ~formatC(.x, digits = 1, format = "f"))) %>%
+  mutate(across(everything(), ~gsub("NA", "", .x))) %>%
+  relocate(Import, .before = Before) %>%
+  relocate(`Manual BP`, .before = Before) %>%
+  kable(caption = paste0("N missing by analysis step (N=", nrow(non_imaging_covariates), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+Systolic and diastolic BP have the same number missing, this makes sense since you get both at the same time
+However, just to be 100% sure I haven't swapped them somewhere compare the medians
+```{r}
+
+print(paste0("Median systolic BP = ", median(non_imaging_covariates$systolic_BP, na.rm = TRUE)))
+print(paste0("Median diastolic BP = ", median(non_imaging_covariates$diastolic_BP, na.rm = TRUE)))
+
+```
+These medians make sense
+
+=========================================================================
+Smoking
+
+Updated 6/27/23 to work with the new data coding system in the UK Biobank data we got in Spring 2023. I reduced the number of variables to just ever_daily_smoker, never_smoker, and pack years since I have not been using the other smoking variables.
+
+Updated on 1/9/22 to more closely match how Yoonhoo handles the flow of smoking questions.
+Already renamed pack years. Initially many participants are missing pack years. Some are non-smokers, and there is also a group of light smokers who were not asked about onset / offset of smoking
+This second group is MNAR, so cannot use imputation on them
+
+As noted at the top of this script, this version assumes initial processing of the baseline and imaging smoking variables was done in additional_smoking_covariates.Rmd
+
+
+Get the rate of missing in the imaging set before backfilling
+```{r}
+
+missing_report <- rbind(missing_report, data.frame("step" = rep("Before", 5),
+                                                   "data_field" = c("ever_daily_smoked",
+                                                                    "never_smoked",
+                                                                    "smoking_status",
+                                                                    "pack_years",
+                                                                    "cig_per_day"),
+                             "n_missing" = c(sum(is.na(imaging_smoking$ever_daily_smoked)),
+                                             sum(is.na(imaging_smoking$never_smoked)),
+                                             sum(is.na(imaging_smoking$smoking_status)),
+                                             sum(is.na(imaging_smoking$pack_years)),
+                                             sum(is.na(imaging_smoking$cig_per_day)))))
+
+```
+
+
+Combine the data sets
+
+```{r}
+
+# Rename the baseline columns so we can reference them
+names(baseline_smoking) <- names(baseline_smoking) %>%
+  paste0(., "_baseline")
+
+# Fix eid
+baseline_smoking <- baseline_smoking %>%
+  dplyr::rename("n_eid" = n_eid_baseline)
+
+all_smoking <- left_join(imaging_smoking, baseline_smoking, by = "n_eid")
+
+```
+
+Now backfill with values from the baseline survey
+
+```{r}
+
+all_smoking <- all_smoking %>%
+  mutate(ever_daily_smoked = ifelse(is.na(ever_daily_smoked), ever_daily_smoked_baseline, ever_daily_smoked)) %>%
+  mutate(never_smoked = ifelse(is.na(never_smoked), never_smoked_baseline, never_smoked)) %>%
+  mutate(smoking_status = ifelse(is.na(smoking_status), smoking_status_baseline, smoking_status)) %>%
+  mutate(pack_years = ifelse(is.na(pack_years), pack_years_baseline, pack_years)) %>%
+  mutate(cig_per_day = ifelse(is.na(cig_per_day), cig_per_day_baseline, cig_per_day))
+
+# Select relevant columns and remove the imaging / baseline data sets
+all_smoking <- all_smoking %>%
+  select(n_eid, ever_daily_smoked, never_smoked, smoking_status, pack_years, cig_per_day)
+
+rm(imaging_smoking)
+rm(baseline_smoking)
+
+
+```
+
+Update the missing report
+
+```{r}
+
+missing_report <- rbind(missing_report, data.frame("step" = rep("After", 5),
+                                                   "data_field" = c("ever_daily_smoked",
+                                                                    "never_smoked",
+                                                                    "smoking_status",
+                                                                    "pack_years",
+                                                                    "cig_per_day"),
+                             "n_missing" = c(sum(is.na(all_smoking$ever_daily_smoked)),
+                                             sum(is.na(all_smoking$never_smoked)),
+                                             sum(is.na(all_smoking$smoking_status)),
+                                             sum(is.na(all_smoking$pack_years)),
+                                             sum(is.na(all_smoking$cig_per_day)))))
+
+```
+
+Visualize the missing report again
+
+```{r}
+
+missing_report %>%
+  pivot_wider(id_cols = data_field, names_from = step, values_from = n_missing) %>%
+  relocate("Manual BP", .before = Before) %>%
+  relocate(Import, .before = "Manual BP") %>%
+  mutate(percent_backfilled = (Before - After) / nrow(non_imaging_covariates) * 100) %>%
+  mutate(across(-percent_backfilled, ~formatC(.x, format = "d"))) %>%
+  mutate(across(percent_backfilled, ~formatC(.x, digits = 1, format = "f"))) %>%
+  mutate(across(everything(), ~gsub("NA", "", .x))) %>%
+  kable(caption = paste0("N missing by analysis step (N=", nrow(non_imaging_covariates), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+With the backfilling procedure there are very few missing values left!
+
+Start the imputation table with the relevant columns from non-imaging covariates + alcohol + smoking
+
+```{r}
+
+imputation_table <- non_imaging_covariates %>%
+  select(n_eid, diabetes, BMI, diastolic_BP, systolic_BP, education_years, income) %>%
+  left_join(imaging_alcohol, by = "n_eid")  %>%
+  left_join(all_smoking, by = "n_eid") %>%
+  left_join(select(imaging_covariates, c(n_eid, sex, age, date)), by = "n_eid")
+
+```
+
+Make a table with mean and SD of non-imaging covariates before imputation
+Note that this is only done for the numeric variables
+
+Set a list of the non-numeric variables
+```{r}
+
+non_numeric <- c("n_eid", "sex", "diabetes", "never_alcohol", "alcohol_status",
+            "smoking_status", "ever_daily_smoked", "never_smoked")
+
+```
+
+
+```{r}
+
+imputation_table %>%
+  select(-all_of(non_numeric)) %>%
+  summarise_all(funs(mean, sd, min, max), na.rm = TRUE) %>%
+  pivot_longer(cols = everything(), names_to = "name", values_to = "value") %>%
+  mutate(measure = case_when(
+    grepl("_mean", name) ~ "mean",
+    grepl("_sd", name) ~ "sd",
+    grepl("_min", name) ~ "min",
+    grepl("_max", name) ~ "max")) %>%
+  mutate(name = gsub("_mean", "", name)) %>%
+  mutate(name = gsub("_sd", "", name)) %>%
+  mutate(name = gsub("_min", "", name)) %>%
+  mutate(name = gsub("_max", "", name)) %>%
+  pivot_wider(id_cols = name, names_from = measure, values_from = value) %>%
+  mutate(mean = formatC(mean, digits = 2, format = "f")) %>%
+  mutate(sd = formatC(sd, digits = 2, format = "f"))  %>%
+  mutate(min = formatC(min, digits = 2, format = "f"))  %>%
+  mutate(max = formatC(max, digits = 2, format = "f"))  %>%
+  kable(caption = paste0("Mean and SD in Non-Imaging Covariates Before Imputation (N=",
+                         nrow(non_imaging_covariates), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+Save the imputation table (pre-scaling)
+```{r}
+
+save(imputation_table, file = paste0(output_path, "pre_imputation_covariates_", Sys.Date(), ".RData"))
+
+```
+
+Check the numbers of missing values by variable in the imputation table before performing imputation
+```{r}
+
+imputation_table %>%
+  summarise_at(vars(-n_eid), ~ sum(is.na(.x))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "n_missing") %>%
+  mutate(percent_missing = n_missing / nrow(imaging_covariates) * 100) %>%
+  mutate(percent_missing = formatC(percent_missing, digits = 3, format = "f")) %>%
+  kable(caption = paste0("Missing Values Before Imputation (N=", nrow(imputation_table), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+
+=========================Normalize and handle skew============================================
+
+The IDPs are z-score normalized, the imaging covariates are z-score normalized, so the alcohol / smoking phenotypes
+and non-imaging covariates should be normalized as well.
+
+Before normalization, capture the mean and sd of all the columns in order to de-normalize some measures later
+Exclude columns which are binary (sex, stress, diabetes, cancer, other_diagnosis, longstanding, stroke,
+ever_daily_smoked, never_smoked)
+```{r}
+
+means <- imputation_table %>%
+  summarize(across(-all_of(non_numeric),
+                   ~mean(.x, na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "covariate", values_to = "mean")
+
+sd <- imputation_table %>%
+  summarize(across(-all_of(non_numeric),
+                   ~sd(.x, na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "covariate", values_to = "sd")
+
+pre_scaling <- left_join(means, sd, by = "covariate")
+
+save(pre_scaling, file = paste0(output_path, "pre_scaling_", Sys.Date(), ".RData"))
+
+```
+
+
+Normalize all the continuous / numeric measures
+```{r}
+
+imputation_table <- imputation_table %>%
+  mutate(across(-all_of(non_numeric),
+                ~scale(.x, center = TRUE, scale = TRUE)))
+
+```
+
+
+```{r}
+
+imputation_table %>%
+  select(!all_of(non_numeric)) %>%
+  pivot_longer(cols = everything(), names_to = "covariate", values_to = "values")  %>%
+  ggplot(aes(x = values)) +
+  geom_histogram() +
+  facet_wrap(~ covariate)
+
+
+```
+
+Removed log transforming drinks and pack years, they are skewed and that is ok
+
+Save the table as a .csv
+Why to do this? There is an error about some of the columns being matrices that cannot be fixed any other way.
+R why are you like this?
+
+```{r}
+
+write.csv(imputation_table, file = paste0(output_path, "pre_imputation_", Sys.Date(), ".csv"))
+rm(imputation_table)
+
+```
+
+==================================================================================================
+IMPUTATION
+
+Keep track of what type of variable the columns being imputed are:
+drink_freq = numeric
+  week_drinks = numeric
+***never_alcohol = logical
+***alcohol_status = categorical
+
+***ever_daily_smoked = logical
+***never_daily_smoked = logical
+***smoking_status = categorical
+  pack_years = numeric
+  cig_per_day = numeric
+  
+  ***sex = logical
+  age = numeric
+    date = numeric
+
+***diabetes = logical
+  BMI = numeric
+  diastolic_BP = numeric
+  systolic BP = numeric
+  education_years" = numeric
+  income = numeric
+  
+
+Reload the imputation table - saving and reloading makes the columns NOT matrices and fixes the cannot handle matrix error
+```{r}
+
+imputation_table<- read.csv(paste0(output_path, "pre_imputation_", Sys.Date(), ".csv"))
+
+imputation_table <- imputation_table %>%
+  select(-X)
+
+```
+
+
+At one point I had written my own function for this
+Now I am using the mice function so it will be more standard
+```{r}
+
+set.seed(1987)
+post_imputation <- mice(imputation_table, m = 15, method = "cart", seed = 6)
+
+```
+
+Some of the variables do not show up in imputation, this is because they have no missing
+
+Take a look at convergence in some of the categories with more missing values, is 5 enough rounds?
+
+```{r}
+
+post_imputation$imp$education_years %>%
+  tibble::rownames_to_column(var = "n_eid") %>%
+  mutate("1" = (1 - 2) / 1) %>%
+  mutate("2" = (2 - 3) / 2) %>%
+  mutate("3" = (3 - 4) / 3) %>%
+  mutate("4" = (4 - 5) / 4) %>%
+  mutate("5" = (5 - 6) / 5) %>%
+  mutate("6" = (6 - 7) / 6) %>%
+  mutate("7" = (7 - 8) / 7) %>%
+  mutate("8" = (8 - 9) / 8) %>%
+  mutate("9" = (9 - 10) / 9) %>%
+  mutate("10" = (10 - 11) / 10) %>%
+  mutate("11" = (11 - 12) / 11) %>%
+  mutate("12" = (12 - 13) / 12) %>%
+  mutate("13" = (13 - 14) / 13) %>%
+  mutate("14" = (14 - 15) / 14) %>%
+  select(n_eid, "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14") %>%
+  pivot_longer(cols = -n_eid, names_to = "round", values_to = "value") %>%
+  mutate(round = factor(round, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"))) %>% {
+  ggplot(., aes(x = round, y = value, color = n_eid, group = n_eid)) +
+  geom_line() +
+  geom_point(size = 3) +
+  ggtitle(paste0("Convergence in Education Years (Missing=", length(unique(.$n_eid)), ")")) +
+      ylim(c(-2, 0))
+  }
+
+
+```
+Take a look at convergence in income, which has the most missing valeus
+
+```{r}
+
+post_imputation$imp$income %>%
+  tibble::rownames_to_column(var = "n_eid") %>%
+  mutate("1" = (1 - 2) / 1) %>%
+  mutate("2" = (2 - 3) / 2) %>%
+  mutate("3" = (3 - 4) / 3) %>%
+  mutate("4" = (4 - 5) / 4) %>%
+  mutate("5" = (5 - 6) / 5) %>%
+  mutate("6" = (6 - 7) / 6) %>%
+  mutate("7" = (7 - 8) / 7) %>%
+  mutate("8" = (8 - 9) / 8) %>%
+  mutate("9" = (9 - 10) / 9) %>%
+  mutate("10" = (10 - 11) / 10) %>%
+  mutate("11" = (11 - 12) / 11) %>%
+  mutate("12" = (12 - 13) / 12) %>%
+  mutate("13" = (13 - 14) / 13) %>%
+  mutate("14" = (14 - 15) / 14) %>%
+  select(n_eid, "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14") %>%
+  pivot_longer(cols = -n_eid, names_to = "round", values_to = "value") %>%
+  mutate(round = factor(round, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"))) %>% {
+  ggplot(., aes(x = round, y = value, color = n_eid, group = n_eid)) +
+  geom_line() +
+  geom_point(size = 3) +
+  ggtitle(paste0("Convergence in Income (Missing=", length(unique(.$n_eid)), ")")) +
+      ylim(c(-2, 0)) +
+      theme(legend.position = "none")
+  }
+
+
+
+```
+
+Save the full post imputation results
+```{r}
+
+save(post_imputation, file = paste0(output_path, "imputation_results_", Sys.Date(), ".RData"))
+
+```
+The above chunk might seem redundant but it's really helpful if you want to change small things in the file without re-running the whole imputation.
+
+```{r}
+
+imputation_results <- complete(post_imputation, 15)
+
+```
+
+
+Check to see that all missing have been filled in with an imputed value
+```{r}
+
+imputation_results %>%
+  summarise_at(vars(-n_eid), ~ sum(is.na(.x))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "n_missing") %>%
+  mutate(percent_missing = n_missing / nrow(imaging_covariates) * 100) %>%
+  mutate(percent_missing = formatC(percent_missing, digits = 3, format = "f")) %>%
+  arrange(desc(n_missing)) %>%
+  kable(caption = paste0("Missing Values After Imputation (N=", nrow(imputation_table), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+Alcohol status and smoking status do not always get imputed
+Fix any that are still missing using other fields
+As of 2/13/24, only 1 of the missing smoking status is not a never_smoked, so easy to assign most of them correctly
+Former is the most likely smoking status for the remaining person
+For alcohol status, if drink_freq > 0, then they are a current drinker
+```{r}
+
+drink_freq_scaled <- (0 - pull(select(filter(pre_scaling, covariate == "drink_freq"), mean)) / pull(select(filter(pre_scaling, covariate == "drink_freq"), sd)))
+
+imputation_results <- imputation_results %>%
+  # never_smoked == TRUE means smoking status should be Never
+  mutate(smoking_status = ifelse(never_smoked == 1, "Never", smoking_status)) %>%
+  # Former is most likely status if never_smoked == FALSE
+  mutate(smoking_status = ifelse(is.na(smoking_status), "Former", smoking_status)) %>%
+  # If drink_freq > 0, then alcohol status is Current
+  mutate(alcohol_status = ifelse(is.na(alcohol_status),
+                                 ifelse(drink_freq > drink_freq_scaled, "Current", alcohol_status), alcohol_status))
+
+imputation_results %>%
+  summarise_at(vars(-n_eid), ~ sum(is.na(.x))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "n_missing") %>%
+  mutate(percent_missing = n_missing / nrow(imaging_covariates) * 100) %>%
+  mutate(percent_missing = formatC(percent_missing, digits = 3, format = "f")) %>%
+  arrange(desc(n_missing))
+
+```
+
+
+=======================================================================================================
+Post imputation
+
+Make a version without scaling using the means and sd saved before scaling
+
+```{r}
+
+un_scaled <- imputation_results %>%
+  select(-all_of(non_numeric[! non_numeric == "n_eid"])) %>%
+  pivot_longer(cols = -n_eid, names_to = "covariate", values_to = "value") %>%
+  left_join(pre_scaling, by = "covariate") %>%
+  mutate(value = value * sd + mean) %>%
+  select(-c(mean, sd)) %>%
+  pivot_wider(id_cols = n_eid, names_from = covariate, values_from = value)
+
+```
+
+As a validation, take a look at the distributions, means, and sd after de-scaling to make sure they are broadly similar to the pre-imputation values
+
+```{r}
+
+un_scaled %>%
+  select(-n_eid) %>%
+  summarise_all(funs(mean, sd, min, max), na.rm = TRUE) %>%
+  pivot_longer(cols = everything(), names_to = "name", values_to = "value") %>%
+  mutate(measure = case_when(
+    grepl("_mean", name) ~ "mean",
+    grepl("_sd", name) ~ "sd",
+    grepl("_min", name) ~ "min",
+    grepl("_max", name) ~ "max")) %>%
+  mutate(name = gsub("_mean", "", name)) %>%
+  mutate(name = gsub("_sd", "", name)) %>%
+  mutate(name = gsub("_min", "", name)) %>%
+  mutate(name = gsub("_max", "", name)) %>%
+  pivot_wider(id_cols = name, names_from = measure, values_from = value) %>%
+  mutate(mean = formatC(mean, digits = 2, format = "f")) %>%
+  mutate(sd = formatC(sd, digits = 2, format = "f"))  %>%
+  mutate(min = formatC(min, digits = 2, format = "f"))  %>%
+  mutate(max = formatC(max, digits = 2, format = "f"))  %>%
+  kable(caption = paste0("Mean and SD in Non-Imaging Covariates After Imputation (N=",
+                         nrow(non_imaging_covariates), ")")) %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+Means and sd are largely the same comparing to the table from before imputation
+
+Add the non-numeric variables to unscaled
+```{r}
+
+un_scaled <- un_scaled %>%
+  left_join(select(imputation_results, all_of(non_numeric)), by = "n_eid")
+
+```
+
+Add the un-scaled columns for alcohol, pack years, and age to the main imputation results table
+This makes running the regressions easy
+
+```{r}
+
+imputation_results <- imputation_results %>%
+  dplyr::rename("scaled_week_drinks" = week_drinks) %>%
+  dplyr::rename("scaled_pack_years" = pack_years) %>%
+  dplyr::rename("scaled_cig_per_day" = cig_per_day) %>%
+  dplyr::rename("scaled_age" = age) %>%
+  left_join(select(un_scaled, c(n_eid, week_drinks, pack_years, cig_per_day, age)), by = "n_eid")
+
+```
+
+
+Make some additional alcohol columns
+
+```{r}
+
+# Divide drinks per month (month_drinks) by drinking days per month (drink_freq)
+imputation_results <- imputation_results %>%
+  mutate(drink_freq = drink_freq * pull(select(filter(pre_scaling, covariate == "drink_freq"), sd)) + 
+           pull(select(filter(pre_scaling, covariate == "drink_freq"), mean))) %>%
+  mutate(drinks_per_day = ifelse(drink_freq == 0, 0, (week_drinks * 4.3) / drink_freq))
+
+
+# Create a binary_binge column - are typical drinks per drink day 5 or more?
+imputation_results <- imputation_results %>%
+  mutate(binary_binge = ifelse(drinks_per_day >= 5, 1, 0))
+
+```
+
+
+Save the final imputed covariates!
+
+```{r}
+
+save(imputation_results, file = paste0(output_path, "imputed_covariates_", Sys.Date(), ".RData"))
+save(un_scaled, file = paste0(output_path, "un_scaled_covariates_", Sys.Date(), ".RData"))
+save(missing_report, file = paste0(output_path, "missing_report_p5_", Sys.Date(), ".RData"))
+
+```
+
+
+
+```{r}
+
+print(paste0("Script last run ", Sys.Date()))
+
+```
+
+

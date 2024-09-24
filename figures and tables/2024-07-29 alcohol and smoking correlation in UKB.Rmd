@@ -1,0 +1,200 @@
+---
+title: "Alcohol x smoking correlation"
+output:
+  html_document:
+    df_print: paged
+---
+
+7/22/24 Excluded former alcohol use at the top of the script, also excluded in regression
+I left in some of the references to them in case we want to make the tables with them in
+Former alcohol use have high pack years, which tends to go along with heavy alcohol use in the past
+0 drinks per week is a mis-classification of this group
+
+What is the correlation between alcohol (week drinks) and smoking (pack years)
+Show pack years by drinking group
+
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+```{r}
+
+load(paste0(output_path, "filtered_eid_p2_", run_date, ".RData"))
+
+```
+
+Load the unscaled covariates generated after imputation
+```{r}
+
+load(paste0(output_path, "un_scaled_covariates_", run_date, ".RData"))
+
+```
+
+Remove people with past alcohol use
+```{r}
+
+un_scaled %>%
+  group_by(alcohol_status) %>%
+  tally()
+
+```
+
+```{r}
+
+un_scaled <- un_scaled %>%
+  filter(alcohol_status != "Former")
+
+un_scaled %>%
+  group_by(alcohol_status) %>%
+  tally()
+
+```
+
+
+What is the correlation?
+```{r}
+
+tidy(cor.test(un_scaled$week_drinks, un_scaled$pack_years))
+
+```
+
+This is actually quite low correlation
+
+```{r}
+
+print(paste0("n=", nrow(un_scaled)))
+
+```
+
+Make a table to see pack years by drinking group
+I previously had a dot plot but it's not actually very helpful due to the low correlation and large number of participants
+
+
+A problem is the relatively high pack years in never / former - what is going on there?
+Split out never and former
+```{r}
+
+smoking_by_alcohol <- un_scaled %>%
+  mutate(groups = case_when(
+    alcohol_status == "Never" ~ "0 (never)",
+    alcohol_status == "Former" ~ "0 (former)",
+    week_drinks <= 1 ~ "<=1",
+    week_drinks <= 7 ~ ">1 - 7",
+    week_drinks <= 14 ~ ">7 - 14",
+    week_drinks <= 21 ~ ">14 - 21",
+    week_drinks > 21 ~ ">21")) %>%
+  select(groups, pack_years) %>%
+  group_by(groups) %>%
+  summarise(n = n(), mean = mean(pack_years), sd = sd(pack_years)) %>%
+  mutate(percent = n / nrow(un_scaled) * 100) %>%
+  mutate(conf = 1.96 * (sd / sqrt(n))) %>%
+  mutate(lower = mean - conf) %>%
+  mutate(upper = mean + conf) %>%
+  mutate(groups = factor(groups, levels = c("0 (never)", "0 (former)", "<=1", ">1 - 7",
+                                            ">7 - 14", ">14 - 21", ">21"))) %>%
+  arrange(groups) %>%
+  relocate(percent, .after = n) %>%
+  select(-c(sd, conf)) %>%
+  mutate(percent = formatC(percent, format = "d")) %>%
+  mutate(across(c(mean, lower, upper), ~formatC(.x, digits = 2, format = "f"))) %>%
+  dplyr::rename("Drinks per week" = groups, "Pack years (avg)" = mean, "Lower bound" = lower,
+                "Upper bound" = upper)
+
+
+smoking_by_alcohol
+
+```
+
+This looks a lot more like we'd expect, former alcohol use has higher pack years while those who never used alcohol have the lowest pack years
+
+Re-do the correlation, excluding the former alcohol use people
+7/22/24 Former alcohol use scluded overall, still leaving extra exclusion in this script
+```{r}
+
+tidy(cor.test(pull(select(filter(un_scaled, alcohol_status != "Former"), week_drinks)),
+              pull(select(filter(un_scaled, alcohol_status != "Former"), pack_years))))
+
+```
+
+r increases to 0.18, the former alcohol use group did have an effect but it was small
+
+Save as an excel file to make a nice table
+```{r}
+
+write.csv(smoking_by_alcohol, file = paste0("smoking_by_alcohol_", Sys.Date(), ".csv"))
+
+```
+
+
+Do the same, but with alcohol by smoking
+```{r}
+
+alcohol_by_smoking <- un_scaled %>%
+  mutate(groups = case_when(
+    never_smoked == 1 ~ "0 (never*)",
+    pack_years <= 1 ~ "<=1**",
+    pack_years <= 10 ~ ">1 - 10",
+    pack_years <= 20 ~ ">10 - 20",
+    pack_years <= 40 ~ ">20 - 40",
+    pack_years > 40 ~ ">40")) %>%
+  select(groups, week_drinks) %>%
+  group_by(groups) %>%
+  summarise(n = n(), mean = mean(week_drinks), sd = sd(week_drinks)) %>%
+  mutate(percent = n / nrow(un_scaled) * 100) %>%
+  mutate(conf = 1.96 * (sd / sqrt(n))) %>%
+  mutate(lower = mean - conf) %>%
+  mutate(upper = mean + conf) %>%
+  mutate(groups = factor(groups, levels = c("0 (never*)", "<=1**", ">1 - 10",
+                                            ">10 - 20", ">20 - 40", ">40"))) %>%
+  arrange(groups) %>%
+  relocate(percent, .after = n) %>%
+  select(-c(sd, conf)) %>%
+  mutate(percent = formatC(percent, format = "d")) %>%
+  mutate(across(c(mean, lower, upper), ~formatC(.x, digits = 2, format = "f"))) %>%
+  dplyr::rename("Pack years" = groups, "Drinks per week (mean)" = mean, "Lower bound" = lower,
+                "Upper bound" = upper)
+
+alcohol_by_smoking
+
+```
+
+Save as an excel file to make a nice table
+```{r}
+
+write.csv(alcohol_by_smoking, file = paste0("alcohol_by_smoking_", Sys.Date(), ".csv"))
+
+```
+
+
+
+
+
+
+
+
+

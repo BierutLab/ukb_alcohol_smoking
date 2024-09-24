@@ -1,0 +1,192 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Tables generated:
+N tracker
+Final regression counts by MRI sequence
+Neuro condition table
+Missing before and after table
+
+
+```{r}
+
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+library(forcats)
+library(cetcolor) # Run install.packages("cetcolor")
+library(sf)
+
+```
+
+
+Set the date prior steps of the pipeline were run
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+Set the order of covariates so order matches through all tables
+(updated 7/25/24)
+```{r}
+
+covariates <-c("week_drinks", "pack_years",
+                "sex", "age", "income", "education_years", "BMI", "diabetes", "systolic_BP", "diastolic_BP",
+               "head_size", "site", "date", "rfMRI_motion",
+               "PC_1", "PC_2", "PC_3", "PC_4", "PC_5", "PC_6", "PC_7", "PC_8", "PC_9", "PC_10")
+
+```
+
+N tracker
+Load the n tracker to make a strobe flow table
+Final regression counts by MRI sequence
+```{r}
+
+load(paste0(output_path, "n_tracker_p7_", run_date, ".RData"))
+
+# N of each MRI subtype
+load(paste0(output_path, "regression_n_tracker_", run_date, ".RData"))
+
+```
+
+Order the table of MRI types
+```{r}
+
+regression_n_tracker <- regression_n_tracker %>%
+  mutate(MRI = factor(MRI, levels = c("total volumes", "T1", "T2", "dMRI", "rfMRI"))) %>%
+  arrange(MRI)
+
+```
+
+Save as an excel file to make a nice table
+```{r}
+
+write.csv(n_tracker, file = paste0("n_tracker_", Sys.Date(), ".csv"))
+write.csv(regression_n_tracker, file = paste0("final_MRI_n_", Sys.Date(), ".csv"))
+
+```
+
+Neuro condition table
+```{r}
+
+load(paste0(output_path, "neuro_disease_table_", run_date, ".RData"))
+
+# Combine Ischaemic stroke and Stroke or ischaemic stroke into one line
+stroke <- filter(neuro_disease_table, condition %in% c("Ischaemic stroke", "Stroke or ischaemic stroke"))
+stroke_codes <- "1583 and 1081"
+stroke_n <- sum(stroke$n)
+stroke_percent <- formatC(sum(as.numeric(stroke$percent)), digits = 2, format = "f")
+
+neuro_disease_table <- neuro_disease_table %>%
+  filter(! condition %in% c("Ischaemic stroke", "Stroke or ischaemic stroke")) %>%
+  rbind(data.frame(
+    "condition" = c("Stroke"),
+    "code" = c(stroke_codes),
+    "n" = c(stroke_n),
+    "percent" = c(stroke_percent))) %>%
+  
+  # Make the table alphabetical to faciliate finding conditions
+  arrange(condition)
+
+write.csv(neuro_disease_table, file = paste0("neuro_disease_", Sys.Date(), ".csv"))
+
+```
+
+Missing before and after table
+Load missing values before and after backfilling
+```{r}
+
+load(paste0(output_path, "missing_report_p5_", run_date, ".RData"))
+
+```
+
+```{r}
+
+missing_report <- missing_report %>%
+  pivot_wider(id_cols = data_field, names_from = step, values_from = n_missing) %>%
+  relocate("Manual BP", .before = Before) %>%
+  relocate(Import, .before = "Manual BP") %>%
+  mutate(percent_backfilled = (Before - After) /
+           pull(select(filter(n_tracker, Step == "Drop missing imaging covariates"), N)) * 100) %>%
+  mutate(across(-percent_backfilled, ~formatC(.x, format = "d"))) %>%
+  mutate(across(percent_backfilled, ~formatC(.x, digits = 1, format = "f"))) %>%
+  mutate(across(everything(), ~gsub("NA", "", .x))) %>%
+  mutate(data_field = trimws(data_field)) %>%
+  filter(data_field %in% covariates) %>%
+  mutate(data_field = factor(data_field, levels = covariates)) %>%
+  arrange(data_field)
+
+
+missing_report
+
+```
+
+Add a column with which data field the variable is derived from
+```{r}
+
+derived_from <- data.frame((rbind(
+ c("week_drinks", "Drinks per week", "*"),
+ c("pack_years", "Pack years smoking", "20161"),
+ 
+ # Person
+ c("sex", "Sex (genetic)", "22001"),
+ c("age", "Age at imaging appointment (years)", "21003"),
+ 
+ # Attainment
+ c("income", "Income (pounds)", "738"),
+ c("education_years", "Years of education derived from Qualifications", "6138"),
+ 
+ # Health
+ c("BMI", "Body mass index", "21001"),
+ c("diabetes", "Diabetes diagnosed by a doctor", "2443"),
+ c("systolic_BP", "Systolic blood pressure (mmHg)", "4080 (automatic), 93 (manual)"),
+ c("diastolic_BP", "Diastolic blood pressure (mmHg)", "4079 (automatic), 94 (manual)"),
+ 
+ # Imaging
+ c("head_size", "Volumetric scaling from T1 to standard space", "25000"),
+ c("site", "Imaging site", "54"),
+ c("date", "Imaging date (days since January 1 1970)", "53"),
+ c("rfMRI_motion", "Mean rfMRI motion", "25741"))))
+
+derived_from <- derived_from %>%
+  dplyr::rename("data_field" = X1, "description" = X2, "derived_from" = X3)
+
+
+```
+
+Add the new columns
+```{r}
+
+missing_report <- missing_report %>%
+  left_join(derived_from, by = "data_field") %>%
+  relocate(c(description, derived_from), .after = data_field)
+
+```
+
+Save as an excel file to make a nice table
+```{r}
+
+write.csv(missing_report, file = paste0("missing_report_", Sys.Date(), ".csv"))
+
+```
+
+
+
+

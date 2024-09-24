@@ -1,0 +1,292 @@
+---
+title: "Regression with VIF"
+output:
+  html_document:
+    df_print: paged
+---
+
+Check variance inflation factor (VIF) in the model to ensure validity
+
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra)
+library(car)
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+Load the IDP names table to stitch in after regression is done
+From step 0 of the pipeline
+
+```{r}
+
+load(paste0(output_path, "IDP_names_table_", run_date, ".RData"))
+
+```
+
+
+Load then filter the genetic PCs
+```{r}
+
+load(paste0(output_path, "filtered_eid_p2_", run_date, ".RData"))
+
+```
+
+Load the processed imaging covariates
+From step 2 of the pipeline
+```{r}
+
+load(paste0(output_path, "/processed_imaging_covariates_", run_date, ".RData"))
+
+```
+
+Load the covariates that have been processed with backfilling imaging data with baseline data and then imputation
+From step 3 of the pipeline
+```{r}
+
+load(paste0(output_path, "/imputed_covariates_", run_date, ".RData"))
+
+```
+
+7/29/24 genetic PCs back in the model
+```{r}
+
+load(paste0(output_path, "/genetic_PC_", run_date, ".RData"))
+
+```
+
+Combine the tables to make a regression table
+```{r}
+
+regression_table <- imputation_results %>%
+  select(-c(sex, age, date)) %>%
+  filter(n_eid %in% filtered_eid) %>% 
+  left_join(imaging_covariates, by = "n_eid") %>%
+  left_join(genetic_PC, by = "n_eid")
+  
+rm(imputation_results)
+rm(imaging_covariates)
+gc()
+
+```
+Site is a categorical variable, factor and set the reference level
+```{r}
+
+regression_table <- regression_table %>%
+  mutate(site = factor(site, levels = c("cheadle", "reading", "newcastle", "bristol")))
+
+```
+
+
+7/8/24 Drop former alcohol use people
+```{r}
+
+load(paste0(output_path, "/n_tracker_p2_", run_date, ".RData"))
+
+```
+
+```{r}
+
+regression_table <- regression_table %>%
+  filter(alcohol_status != "Former")
+
+regression_table %>%
+  group_by(alcohol_status) %>%
+  tally()
+
+```
+
+
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Former alcohol consumption removed", "N" = nrow(regression_table)))
+
+```
+
+
+Define a function for regression (will run on all the different sets of IDPs)
+Define a function for regression (will run on all the different sets of IDPs)
+```{r}
+
+
+do_IDP_regression <- function(IDP_table, vars_list, regression_table) {
+  # Function to perform regression using covariates in the regression table on all the IDPs in the supplied IDP table
+  # Will return a table with IDP, alcohol estimate and P value, and pack years estimate and P value
+  
+  # Join the IDPs onto the regression table
+  # Changed this to inner join, R has been sneakily dropping my n the WHOLE time
+  regression_table <- inner_join(IDP_table, regression_table, by = "n_eid", all = FALSE)
+  regression_table <- na.omit(regression_table)
+  # Print the N so user is alerted if this happens
+  print(paste0("IDP N=", nrow(IDP_table), ", regression N=", nrow(regression_table)))
+  
+  IDP_names <- colnames(IDP_table)
+  IDP_names <- IDP_names[IDP_names != "n_eid"]
+  
+  regression <- lapply(IDP_names, function(x) glm(formula(paste("unlist(regression_table[,x]) ~",
+                                             paste(vars_list, collapse = "+"))),
+                                              family = "gaussian", data = regression_table))
+  
+  #Save and return the model object as well as results in tabulated form
+  regression_model <- regression
+  regression <- lapply(regression, tidy)
+  
+  regression_results <- data.frame("alcohol_beta" = c(), "alcohol_p" = c())
+
+  for (n in 1:length(regression)) {
+    
+    IDP <- IDP_names[n]
+    summary_tibble <- regression[[n]]
+    
+    summary_tibble <- summary_tibble %>%
+      mutate(term = gsub("\\(", "", term)) %>%
+      mutate(term = gsub("\\)", "", term)) %>%
+      mutate(term = tolower(term)) %>%
+      select(term, estimate, std.error, p.value) %>%
+      pivot_longer(cols = c(estimate, std.error, p.value), names_to = "stat", values_to = "value")
+    
+    summary_tibble <- summary_tibble %>%
+      mutate(col_name = case_when(
+      (stat == "estimate") ~ paste0(term, "_beta"),
+      (stat == "std.error") ~ paste0(term, "_se"),
+      (stat == "p.value") ~ paste0(term, "_p"))) %>%
+      select(col_name, value) %>%
+      pivot_wider(names_from = col_name, values_from = value)
+    
+    new_row <- data.frame("IDP" = IDP)
+    
+    new_row <- cbind(new_row, summary_tibble)
+    
+    
+    regression_results <- rbind(regression_results, new_row)
+    
+  }
+  
+# Return the model for this script
+  return(regression_model)
+}
+
+
+```
+
+
+
+Set up the list of covariates (updated 7/25/24)
+```{r}
+
+covariates <-c("sex", "age", "income", "education_years", "BMI", "diabetes", "systolic_BP", "diastolic_BP",
+               "head_size", "site", "date", "rfMRI_motion",
+               "PC_1", "PC_2", "PC_3", "PC_4", "PC_5", "PC_6", "PC_7", "PC_8", "PC_9", "PC_10")
+
+```
+
+
+Set the predictors for this set of regression analyses
+7/25/24 Normalized predictors in this regression
+```{r}
+
+predictors <- c("scaled_week_drinks", "scaled_pack_years", "scaled_week_drinks*scaled_pack_years")
+
+```
+
+
+Load IDPs and perform regression
+```{r}
+
+load(paste0(output_path, "total_volumes_", run_date, ".RData"))
+
+# 7/25/24 scaled total volume measures in this regression script
+total_volumes <- mutate_at(total_volumes, vars(-n_eid), ~scale(.x, center = TRUE, scale = TRUE))
+
+
+total_volume_model <- do_IDP_regression(select(total_volumes, c(n_eid, X26514.2.0)), c(predictors, covariates), regression_table)
+
+
+```
+
+
+The output is a list since I am still using lapply, want to leave the model code as similar to pipeline
+
+```{r}
+
+total_volume_model <- total_volume_model[[1]]
+total_volume_model
+
+```
+
+Which terms are actually helping with model fit?
+Look at VIF
+https://www.rdocumentation.org/packages/car/versions/3.1-2/topics/vif
+
+
+```{r}
+
+model_vif <- vif(total_volume_model)
+
+```
+
+Sort the results from lowest to highest F-test
+f = explained / unexplained
+```{r}
+
+data.frame(model_vif) %>%
+  arrange(desc(GVIF))
+
+```
+
+
+Save the results to make a table for the supplement
+
+```{r}
+
+model_vif_table <- data.frame(model_vif) %>%
+  tibble::rownames_to_column("term") %>%
+  mutate(term = gsub("_", " ", term)) %>%
+  mutate(term = gsub("scaled ", "", term)) %>%
+  mutate(term = ifelse(term == "week drinks:pack years", "interaction", term)) %>%
+  select(c(term, Df, GVIF)) %>%
+  mutate(term = factor(term, levels = c(c("week drinks", "pack years", "interaction"),
+                                        gsub("_", " ", covariates)))) %>%
+  mutate(GVIF = formatC(GVIF, digits = 2, format = "f"))
+
+model_vif_table
+
+```
+
+
+```{r}
+
+save(model_vif_table, file = paste0("model_VIF_", Sys.Date(), ".RData"))
+write.csv(model_vif_table, file = paste0("model_VIF_", Sys.Date(), ".csv"))
+
+```
+
+
+
+
+
+
+
+

@@ -1,0 +1,244 @@
+---
+title: "Alcohol x smoking total volume table"
+---
+
+7/15/24 Put less text on figures, and instead label in PPT for export with editable elements
+
+predictors = week drinks, pack years, interaction
+
+covariates = head size, age, sex, BMI, site, diabetes, diastolic BP
+
+```{r}
+
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+library(forcats)
+library(viridis)
+
+```
+
+
+Set the date prior steps of the pipeline were run
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+No FDR adjustment applied in the regression model script
+```{r}
+
+p_value <- 0.01
+
+```
+
+Set the dpi for output figures
+```{r}
+
+set_dpi <- 1200
+
+```
+
+
+Load the regression results
+```{r}
+
+load(paste0(output_path, "regression_UNscaled_", run_date, ".RData"))
+
+```
+
+
+Also load the n-table, this is a reference for the N of each MRI subtype
+```{r}
+
+load(paste0(output_path, "regression_n_tracker_", run_date, ".RData"))
+
+```
+
+
+After this point I am only using the final column of the n_tracker
+```{r}
+
+regression_n <- regression_n_tracker %>%
+  select(MRI, N)
+
+```
+
+
+Total brain volumes
+June 2023 we switched to using total volumes from the Freesurfer aseg parcellation based on discussion between Yoonhoo and Janine.
+
+26514	Volume of BrainSeg (whole brain)	Freesurfer ASEG  
+26518	Volume of TotalGray (whole brain)	Freesurfer ASEG
+total_wm (sum of 26553	and 26584, Volume of CerebralWhiteMatter right and left)
+26527	Volume of CSF (whole brain)	Freesurfer ASEG 
+26528	Volume of WM-hypointensities (whole brain)	Freesurfer ASEG
+
+All are in mm3, and were not scaled before regression. Alcohol and smoking predictors were also not scaled to increase interperability
+
+```{r}
+
+total_volume_IDPs <- c("X26514.2.0", "X26518.2.0", "total_wm", "X26527.2.0")
+
+```
+
+
+Make a table to show the associations of alcohol and pack years with the total volumes
+```{r}
+
+total_volume_table <- all_IDP_results %>%
+  filter(IDP %in% total_volume_IDPs) %>%
+  mutate(display_name = case_when(
+    IDP == "X26514.2.0"	 ~ "total brain volume",
+    IDP == "X26518.2.0"	 ~ "total grey matter volume",
+    IDP == "total_wm" ~ "total white matter volume",
+    IDP == "X26527.2.0" ~ "total CSF volume")) %>%
+  select(display_name, week_drinks_beta, week_drinks_p,
+         pack_years_beta, pack_years_p,
+         interaction_beta, interaction_p) %>%
+  dplyr::rename("interaction_beta" = interaction_beta,
+                "interaction_p" = interaction_p) %>%
+  mutate_at(c("week_drinks_beta", "pack_years_beta", "interaction_beta"),
+            ~formatC(.x, digits = 2, format = "f")) %>%
+  mutate_at(c("week_drinks_p", "pack_years_p", "interaction_p"),
+            ~ifelse(.x > 0.009, formatC(.x, digits = 2, format = "f"), formatC(.x, digits = 2, format = "e"))) %>%
+  mutate(display_name = factor(display_name, levels = c("total brain volume",
+                                                        "total grey matter volume",
+                                                        "average cortical thickness",
+                                                        "total white matter volume",
+                                                        "total CSF volume"))) %>%
+  arrange(display_name)
+
+total_volume_table
+
+```
+
+Save as an excel file to make a nice table
+```{r}
+
+write.csv(total_volume_table, file = paste0("total_volume_table_", Sys.Date(), ".csv"))
+
+```
+
+
+Make a scatter plot version as well
+No FDR adjustment applied in the regression model script
+```{r}
+
+p_value <- 0.01
+
+```
+
+Calculate z scores for drinks per week and pack years
+2/19/24 
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(alcohol_z = week_drinks_beta / week_drinks_se) %>%
+  mutate(smoking_z = pack_years_beta / pack_years_se)
+
+```
+
+Set up columns to indicate association in common
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(alcohol_sig = ifelse(week_drinks_p <= p_value, 1, 0)) %>%
+  mutate(smoking_sig = ifelse(pack_years_p <= p_value, 1, 0)) %>%
+  mutate(Association = ifelse(alcohol_sig == 1 & smoking_sig == 1, "common", "non-common")) %>%
+  mutate(Association = factor(Association, levels = c("common", "non-common")))
+
+```
+
+Set some consistent plotting limits
+```{r}
+
+#plot_limits <- c(-(max(abs(c(all_IDP_results$alcohol_z, all_IDP_results$smoking_z)))+0.5),
+#                 max(abs(c(all_IDP_results$alcohol_z, all_IDP_results$smoking_z)))+0.5)
+
+plot_limits <- c(-20, 20)
+
+```
+
+Set theme to apply to all plots
+```{r}
+
+theme_replace(
+  # Set the axis text size
+  axis.text.x = element_text(size = 13), axis.text.y = element_text(size = 13),
+  # Background white with no grid lines
+  panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_rect(fill = "white", color = "dark grey"))
+
+```
+
+
+Make a wrapper on ggplot for repeating elements
+```{r}
+
+make_scatter_plot <- function(IDP_results) {
+  plot <- ggplot(IDP_results, aes(x = alcohol_z, y = smoking_z)) +
+  geom_point(size = 2.5, alpha = 0.4) +
+  xlab(" ") +
+  ylab(" ") +
+  xlim(plot_limits) +
+  ylim(plot_limits) +
+  geom_hline(yintercept = 0, color = "dark grey") +
+  geom_hline(yintercept = qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  geom_hline(yintercept = -qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  geom_vline(xintercept = 0, color = "dark grey") +
+  geom_vline(xintercept = qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  geom_vline(xintercept = -qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  coord_fixed()
+  return(plot)
+}
+
+```
+
+
+Calculate correlation for aseg volumes
+```{r}
+
+total_corr <- tidy(cor.test(pull(select(filter(all_IDP_results, IDP %in% total_volume_IDPs), alcohol_z)),
+                          pull(select(filter(all_IDP_results, IDP %in% total_volume_IDPs), smoking_z))))
+
+total_corr
+
+```
+
+
+
+```{r}
+
+total_volume_plot <- all_IDP_results %>%
+  filter(IDP %in% total_volume_IDPs) %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Z-scores in total volume IDPs"))
+
+ggsave(
+  "total_volume.png",
+  total_volume_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+total_volume_plot
+
+
+```
+
+

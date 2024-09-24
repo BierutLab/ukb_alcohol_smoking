@@ -1,0 +1,884 @@
+---
+title: "Alcohol x smoking figures PACK YEARS"
+---
+
+7/15/24 Put less text on figures, and instead label in PPT for export with editable elements
+
+predictors = week drinks, pack years, interaction
+
+covariates = head size, age, sex, BMI, site, diabetes, diastolic BP
+
+```{r}
+
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra) # Run install.packages("kableExtra")
+library(forcats)
+library(viridis)
+
+```
+
+
+Set the date prior steps of the pipeline were run
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+No FDR adjustment applied in the regression model script
+```{r}
+
+p_value <- 0.01
+
+```
+
+Set the dpi for output figures
+```{r}
+
+set_dpi <- 1200
+
+```
+
+
+
+Load the regression results
+```{r}
+
+load(paste0(output_path, "regression_scaled_", run_date, ".RData"))
+
+```
+
+
+Also load the n-table, this is a reference for the N of each MRI subtype
+```{r}
+
+load(paste0(output_path, "regression_n_tracker_", run_date, ".RData"))
+
+```
+
+
+After this point I am only using the final column of the n_tracker
+```{r}
+
+regression_n <- regression_n_tracker %>%
+  select(MRI, N)
+
+```
+
+
+The IDPs with mis-classified dimension:
+X26548.2.0	Mean intensity of Accumbens-area (left hemisphere)			
+X26564.2.0	Volume of Accumbens-area (left hemisphere)			
+X26579.2.0	Mean intensity of Accumbens-area (right hemisphere)			
+X26595.2.0	Volume of Accumbens-area (right hemisphere)
+
+Ensure this is correct
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(dimension = ifelse(IDP %in% c("X26564.2.0", "X26595.2.0"), "volume", dimension))
+
+```
+
+
+What IDPs are in the results?
+```{r}
+
+IDP_tally <- all_IDP_results %>%
+  mutate(group = ifelse(IDP %in% c("X26514.2.0", "X26518.2.0", "total_wm", "X26527.2.0", "X26528.2.0"), "global", "regional")) %>%
+  group_by(MRI, map, dimension, dMRI, group) %>%
+  tally() %>%
+  mutate(MRI = factor(MRI, levels = c("T1", "T2", "rfMRI", "dMRI"))) %>%
+  arrange(MRI) %>%
+  arrange(group)
+
+IDP_tally %>%
+  kable()
+
+
+```
+
+Save the IDP tally as an excel file to make a table
+```{r}
+
+write.csv(IDP_tally, file = paste("IDP_tally_", Sys.Date(), ".csv"))
+
+```
+
+Calculate z scores for drinks per week and pack years
+2/19/24 
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(alcohol_z = scaled_week_drinks_beta / scaled_week_drinks_se) %>%
+  mutate(smoking_z = scaled_pack_years_beta / scaled_pack_years_se)
+
+```
+
+Set up columns to indicate association in common
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(alcohol_sig = ifelse(scaled_week_drinks_p <= p_value, 1, 0)) %>%
+  mutate(smoking_sig = ifelse(scaled_pack_years_p <= p_value, 1, 0)) %>%
+  mutate(Association = ifelse(alcohol_sig == 1 & smoking_sig == 1, "common", "non-common")) %>%
+  mutate(Association = factor(Association, levels = c("common", "non-common")))
+
+```
+
+
+Total brain volumes
+June 2023 we switched to using total volumes from the Freesurfer aseg parcellation based on discussion between Yoonhoo and Janine.
+
+26514	Volume of BrainSeg (whole brain)	Freesurfer ASEG  
+26518	Volume of TotalGray (whole brain)	Freesurfer ASEG
+total_wm (sum of 26553	and 26584, Volume of CerebralWhiteMatter right and left)
+26527	Volume of CSF (whole brain)	Freesurfer ASEG 
+26528	Volume of WM-hypointensities (whole brain)	Freesurfer ASEG
+
+All are in mm3, and were not scaled before regression. Alcohol and smoking predictors were also not scaled to increase interperability
+
+```{r}
+
+total_volume_IDPs <- c("X26514.2.0", "X26518.2.0", "total_wm", "X26527.2.0")
+
+```
+
+Change the map name for these so they don't get counted in ASEG
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  mutate(map = ifelse(IDP %in% total_volume_IDPs, "total volumes", map))
+
+```
+
+
+Set some consistent plotting limits
+```{r}
+
+plot_limits <- c(-(max(abs(c(all_IDP_results$alcohol_z, all_IDP_results$smoking_z)))+0.5),
+                 max(abs(c(all_IDP_results$alcohol_z, all_IDP_results$smoking_z)))+0.5)
+
+```
+
+Calculate correlations
+
+```{r}
+
+
+total_volume_corr <- tidy(cor.test(pull(select(filter(all_IDP_results, IDP %in% total_volume_IDPs), alcohol_z)),
+                          pull(select(filter(all_IDP_results, IDP %in% total_volume_IDPs), smoking_z))))
+
+```
+
+
+```{r}
+
+# DK atlas has area, thickness, and volume, set the dimension here to make sure figures are consistent
+DK_dimension <- "volume"
+
+DKT_volume_corr <- tidy(cor.test(pull(select(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension), alcohol_z)),
+                          pull(select(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension), smoking_z))))
+
+```
+
+
+```{r}
+
+# DK atlas has area, thickness, and volume, set the dimension here to make sure figures are consistent
+DK_dimension <- "thickness"
+
+DKT_thickness_corr <- tidy(cor.test(pull(select(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension), alcohol_z)),
+                          pull(select(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension), smoking_z))))
+
+```
+
+
+```{r}
+
+# DK atlas has area, thickness, and volume, set the dimension here to make sure figures are consistent
+DK_dimension <- "area"
+
+DKT_area_corr <- tidy(cor.test(pull(select(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension), alcohol_z)),
+                          pull(select(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension), smoking_z))))
+
+```
+
+Calculate correlation for aseg volumes
+```{r}
+
+aseg_corr <- tidy(cor.test(pull(select(filter(filter(all_IDP_results, map == "freesurfer_ASEG"), dimension == "volume"), alcohol_z)),
+                          pull(select(filter(filter(all_IDP_results, map == "freesurfer_ASEG"), dimension == "volume"), smoking_z))))
+
+```
+
+Calculate correlation in T2
+```{r}
+
+T2_corr <- tidy(cor.test(pull(select(filter(all_IDP_results, MRI == "T2"), alcohol_z)),
+                          pull(select(filter(all_IDP_results, MRI == "T2"), smoking_z))))
+
+```
+
+
+Get correlation between alcohol and smoking z scores in each NODDI measure
+
+```{r}
+
+# FA
+dMRI_corr <- cbind(data.frame("dMRI" = "FA"), 
+                   tidy(cor.test(
+                     pull(select(filter(all_IDP_results, dMRI == "FA"), alcohol_z)),
+                     pull(select(filter(all_IDP_results, dMRI == "FA"), smoking_z)))))
+
+# MD
+dMRI_corr <- rbind(dMRI_corr,
+                   cbind(data.frame("dMRI" = "MD"),
+                   tidy(cor.test(
+                     pull(select(filter(all_IDP_results, dMRI == "MD"), alcohol_z)),
+                     pull(select(filter(all_IDP_results, dMRI == "MD"), smoking_z))))))
+
+# ICVF
+dMRI_corr <- rbind(dMRI_corr,
+                   cbind(data.frame("dMRI" = "ICVF"),
+                   tidy(cor.test(
+                     pull(select(filter(all_IDP_results, dMRI == "ICVF"), alcohol_z)),
+                     pull(select(filter(all_IDP_results, dMRI == "ICVF"), smoking_z))))))
+
+# ISOVF
+dMRI_corr <- rbind(dMRI_corr,
+                   cbind(data.frame("dMRI" = "ISOVF"),
+                   tidy(cor.test(
+                     pull(select(filter(all_IDP_results, dMRI == "ISOVF"), alcohol_z)),
+                     pull(select(filter(all_IDP_results, dMRI == "ISOVF"), smoking_z))))))
+
+
+```
+
+Do some processing on the table so it will display nice
+```{r}
+
+dMRI_corr_plotter <- dMRI_corr %>%
+  mutate(estimate = formatC(estimate, digits = 2, format = "f")) %>%
+  mutate(p.value = formatC(p.value, digits = 2, format = "e")) %>%
+  mutate(label = paste0("r=", estimate, ", p=", p.value))
+
+```
+
+Correlation for rfMRI
+
+```{r}
+
+rfMRI_corr <- tidy(cor.test(pull(select(filter(all_IDP_results, MRI == "rfMRI"), alcohol_z)),
+                          pull(select(filter(all_IDP_results, MRI == "rfMRI"), smoking_z))))
+
+```
+
+
+
+```{r}
+
+total_volume_corr <- total_volume_corr %>%
+  mutate(MRI = "T1") %>%
+  mutate(map = "total volumes") %>%
+  mutate(dimension = "volume") %>%
+  mutate(dMRI = NA) %>%
+  relocate(c(MRI, map, dimension, dMRI))
+
+```
+
+
+```{r}
+
+DKT_corr <- DKT_volume_corr %>%
+  mutate(dimension = "volume") %>%
+  rbind(mutate(DKT_thickness_corr, dimension = "thickness")) %>%
+  rbind(mutate(DKT_area_corr, dimension = "area")) %>%
+  mutate(MRI = "T1") %>%
+  mutate(map = "freesurfer_DKT") %>%
+  mutate(dMRI = NA) %>%
+  relocate(c(MRI, map, dimension, dMRI))
+
+
+DKT_corr
+
+```
+
+
+```{r}
+
+aseg_corr <- aseg_corr %>%
+  mutate(MRI = "T1") %>%
+  mutate(map = "freesurfer_ASEG") %>%
+  mutate(dimension = "volume") %>%
+  mutate(dMRI = NA) %>%
+  relocate(c(MRI, map, dimension, dMRI))
+
+```
+
+```{r}
+
+T2_corr <- T2_corr %>%
+  mutate(MRI = "T2") %>%
+  mutate(map = NA) %>%
+  mutate(dimension = NA) %>%
+  mutate(dMRI = NA) %>%
+  relocate(c(MRI, map, dimension, dMRI))
+  
+
+```
+
+```{r}
+
+dMRI_corr <- dMRI_corr %>%
+  mutate(MRI = "dMRI") %>%
+  mutate(map = "weighted_mean") %>%
+  mutate(dimension = NA) %>%
+  relocate(c(MRI, map, dimension, dMRI))
+  
+
+```
+
+
+```{r}
+
+rfMRI_corr <- rfMRI_corr %>%
+  mutate(MRI = "rfMRI") %>%
+  mutate(map = NA) %>%
+  mutate(dimension = NA) %>%
+  mutate(dMRI = NA) %>%
+  relocate(c(MRI, map, dimension, dMRI))
+  
+
+```
+
+Bind the correlation results together
+```{r}
+
+corr_results <- total_volume_corr %>%
+  rbind(DKT_corr) %>%
+  rbind(aseg_corr) %>%
+  rbind(T2_corr) %>%
+  rbind(rfMRI_corr) %>%
+  rbind(dMRI_corr)  %>%
+  mutate_at(c("estimate", "conf.low", "conf.high"),
+            ~ifelse(.x > 0.9, formatC(.x, digits = 3, format = "f"), formatC(.x, digits = 2, format = "f"))) %>%
+  mutate_at(c("p.value"),
+            ~ifelse(.x > 0.009, formatC(.x, digits = 2, format = "f"), formatC(.x, digits = 2, format = "e")))
+
+corr_results
+
+```
+
+
+Get counts of n IDP in common vs. total
+```{r}
+
+common_table <- all_IDP_results %>%
+  mutate(map = ifelse(IDP %in% total_volume_IDPs, "total volumes", map)) %>%
+  mutate(measure = ifelse(is.na(dimension), dMRI, dimension)) %>%
+  mutate(measure = ifelse(MRI == "T2", "magnetic susceptibility", measure)) %>%
+  group_by(MRI, map, measure, Association) %>%
+  tally() %>%
+  pivot_wider(id_cols = c(MRI, map, measure), names_from = Association, values_from = n) %>%
+  select(-'non-common') %>%
+  # Add a column with what the threshold for "common" was
+  mutate(p_threshold = p_value)
+
+common_table
+
+```
+
+Make a table of correlations to put in the paper
+```{r}
+
+corr_results_table <- corr_results %>%
+  mutate(measure = ifelse(is.na(dimension), dMRI, dimension)) %>%
+  mutate(measure = ifelse(MRI == "T2", "magnetic susceptibility", measure)) %>%
+  mutate(measure = ifelse(MRI == "rfMRI", "independent components", measure)) %>%
+  mutate(n_IDP = parameter + 2) %>%
+  relocate(c(measure, n_IDP), .after = map) %>%
+  select(-c(dimension, dMRI, statistic, parameter, method, alternative)) %>%
+  relocate(c(conf.low, conf.high), .after = estimate) %>%
+  left_join(common_table, by = c("MRI", "map", "measure")) %>%
+  relocate(common, .after = n_IDP) %>%
+  mutate(MRI = factor(MRI, levels = c("T1", "T2", "dMRI", "rfMRI"))) %>%
+  arrange(MRI)
+
+corr_results_table
+  
+```
+
+Save to paste in
+```{r}
+
+save(corr_results_table, file = paste0("correlation_results_", Sys.Date(), ".RData"))
+write.csv(corr_results_table, file = paste0("corr_results_table_", Sys.Date(), ".csv"))
+
+```
+
+Set theme to apply to all plots
+```{r}
+
+theme_replace(
+  # Set the axis text size
+  axis.text.x = element_text(size = 13), axis.text.y = element_text(size = 13),
+  # Background white with no grid lines
+  panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_rect(fill = "white", color = "dark grey"))
+
+```
+
+
+Make a wrapper on ggplot for repeating elements
+```{r}
+
+make_scatter_plot <- function(IDP_results) {
+  plot <- ggplot(IDP_results, aes(x = alcohol_z, y = smoking_z)) +
+  geom_point(size = 2.5, alpha = 0.4) +
+  xlab(" ") +
+  ylab(" ") +
+  xlim(plot_limits) +
+  ylim(plot_limits) +
+  geom_hline(yintercept = 0, color = "dark grey") +
+  geom_hline(yintercept = qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  geom_hline(yintercept = -qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  geom_vline(xintercept = 0, color = "dark grey") +
+  geom_vline(xintercept = qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  geom_vline(xintercept = -qnorm(p_value), linetype = "dashed", color = "dark grey") +
+  coord_fixed()
+  return(plot)
+}
+
+```
+
+
+Total volumes plot
+z-z plot
+```{r}
+
+total_volumes_plot <- all_IDP_results %>%
+  filter(map == "total volumes") %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Total volumes",
+                 " (", nrow(filter(all_IDP_results, map == "total volumes")), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(total_volume_corr$estimate[[1]], digits = 3, format = "f"), 
+                "\np=", ifelse(total_volume_corr$p.value[[1]] < 0.001,
+                               formatC(total_volume_corr$p.value[[1]], digits = 2, format = "e"),
+                                formatC(total_volume_corr$p.value[[1]], digits = 3, format = "f"))))
+
+ggsave(
+  "total_volumes.png",
+  total_volumes_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+total_volumes_plot
+
+```
+
+
+```{r}
+
+DK_dimension <- "volume"
+
+DKT_volume_plot <- all_IDP_results %>%
+  filter(map == "freesurfer_DKT") %>%
+  filter(dimension == DK_dimension) %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Cortical ", DK_dimension,
+                 " (", nrow(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(DKT_volume_corr$estimate[[1]], digits = 2, format = "f"), 
+                 "\np=", ifelse(DKT_volume_corr$p.value[[1]] < 0.001, formatC(DKT_volume_corr$p.value[[1]],
+                                                                            digits = 2, format = "e"),
+                                formatC(DKT_volume_corr$p.value[[1]], digits = 3, format = "f"))))
+
+ggsave(
+  "DKT_volume.png",
+  DKT_volume_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+DKT_volume_plot
+
+
+```
+
+z-z plot
+```{r}
+
+DK_dimension <- "thickness"
+
+DKT_thickness_plot <- all_IDP_results %>%
+  filter(map == "freesurfer_DKT") %>%
+  filter(dimension == DK_dimension) %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Cortical ", DK_dimension,
+                 " (", nrow(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(DKT_thickness_corr$estimate[[1]], digits = 2, format = "f"), 
+                 "\np=", ifelse(DKT_thickness_corr$p.value[[1]] < 0.001, formatC(DKT_thickness_corr$p.value[[1]],
+                                                                            digits = 2, format = "e"),
+                                formatC(DKT_thickness_corr$p.value[[1]], digits = 3, format = "f"))))
+
+ggsave(
+  "DKT_thickness.png",
+  DKT_thickness_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+DKT_thickness_plot
+
+```
+
+z-z plot
+```{r}
+
+DK_dimension <- "area"
+
+DKT_area_plot <- all_IDP_results %>%
+  filter(map == "freesurfer_DKT") %>%
+  filter(dimension == DK_dimension) %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Cortical ", DK_dimension,
+                 " (", nrow(filter(filter(all_IDP_results, map == "freesurfer_DKT"), dimension == DK_dimension)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(DKT_area_corr$estimate[[1]], digits = 2, format = "f"), 
+                 "\np=", ifelse(DKT_area_corr$p.value[[1]] < 0.001, formatC(DKT_area_corr$p.value[[1]],
+                                                                            digits = 2, format = "e"),
+                                formatC(DKT_area_corr$p.value[[1]], digits = 3, format = "f"))))
+
+ggsave(
+  "DKT_area.png",
+  DKT_area_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+DKT_area_plot
+
+```
+
+Make figures on the ASEG atlas
+
+z-z plot
+```{r}
+
+aseg_plot <- all_IDP_results %>%
+  filter(map == "freesurfer_ASEG") %>%
+  filter(dimension == "volume") %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Subcortical volumes",
+                 " (", nrow(filter(filter(all_IDP_results, map == "freesurfer_ASEG"), dimension == "volume")), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(aseg_corr$estimate[[1]], digits = 2, format = "f"), 
+                "\np=", ifelse(aseg_corr$p.value[[1]] < 0.001, formatC(aseg_corr$p.value[[1]], digits = 2, format = "e"),
+                                formatC(aseg_corr$p.value[[1]], digits = 3, format = "f"))))
+
+ggsave(
+  "aseg.png",
+  aseg_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+aseg_plot
+
+```
+
+
+Make figures for T2
+
+```{r}
+
+T2_plot <- all_IDP_results %>%
+  filter(MRI == "T2") %>%
+  make_scatter_plot() +
+  ggtitle(paste0("Magnetic susceptibility T2*",
+                 " (", nrow(filter(all_IDP_results, MRI == "T2")), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(T2_corr$estimate[[1]], digits = 2, format = "f"), 
+                 "\np=", ifelse(T2_corr$p.value[[1]] < 0.001, formatC(T2_corr$p.value[[1]], digits = 2, format = "e"),
+                                formatC(T2_corr$p.value[[1]], digits = 3, format = "f"))))
+    
+ggsave(
+  "T2.png",
+  T2_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+T2_plot
+
+```
+
+
+z-z plot
+```{r}
+
+dMRI_measure <- "FA"
+
+FA_plot <- all_IDP_results %>%
+  filter(MRI == "dMRI") %>%
+  filter(dMRI == dMRI_measure) %>%
+  make_scatter_plot() +
+  ggtitle(paste0(dMRI_measure,
+                 " (", nrow(filter(filter(all_IDP_results, MRI == "dMRI"), dMRI == dMRI_measure)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), estimate)),
+                                         digits = 2, format = "f"), 
+                 "\np=", ifelse(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)) < 0.01,
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                        digits = 2, format = "e"),
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                digits = 3, format = "f"))))
+
+ggsave(
+  "FA.png",
+  FA_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+FA_plot
+
+```
+
+z-z plot
+```{r}
+
+dMRI_measure <- "MD"
+
+MD_plot <- all_IDP_results %>%
+  filter(MRI == "dMRI") %>%
+  filter(dMRI == dMRI_measure) %>%
+  make_scatter_plot() +
+  ggtitle(paste0(dMRI_measure,
+                 " (", nrow(filter(filter(all_IDP_results, MRI == "dMRI"), dMRI == dMRI_measure)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), estimate)),
+                                         digits = 2, format = "f"), 
+                           "\np=", ifelse(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)) < 0.01,
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                        digits = 2, format = "e"),
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                digits = 2, format = "f"))))
+
+ggsave(
+  "MD.png",
+  MD_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+MD_plot
+
+```
+
+z-z plot
+```{r}
+
+dMRI_measure <- "ICVF"
+
+ICVF_plot <- all_IDP_results %>%
+  filter(MRI == "dMRI") %>%
+  filter(dMRI == dMRI_measure) %>%
+  make_scatter_plot() +
+  ggtitle(paste0(dMRI_measure,
+                 " (", nrow(filter(filter(all_IDP_results, MRI == "dMRI"), dMRI == dMRI_measure)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), estimate)),
+                                         digits = 2, format = "f"),
+                           "\np=", ifelse(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)) < 0.01,
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                        digits = 2, format = "e"),
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                digits = 2, format = "f"))))
+
+ggsave(
+  "ICVF.png",
+  ICVF_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+ICVF_plot
+
+```
+
+z-z plot
+```{r}
+
+dMRI_measure <- "ISOVF"
+
+ISOVF_plot <- all_IDP_results %>%
+  filter(MRI == "dMRI") %>%
+  filter(dMRI == dMRI_measure) %>%
+  make_scatter_plot() +
+  ggtitle(paste0(dMRI_measure,
+                 " (", nrow(filter(filter(all_IDP_results, MRI == "dMRI"), dMRI == dMRI_measure)), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), estimate)),
+                                         digits = 2, format = "f"),
+                           "\np=", ifelse(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)) < 0.01,
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                        digits = 2, format = "e"),
+                                formatC(pull(select(filter(dMRI_corr, dMRI == dMRI_measure), p.value)),
+                                digits = 2, format = "f"))))
+
+ggsave(
+  "ISOVF.png",
+  ISOVF_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+ISOVF_plot
+
+```
+
+```{r}
+
+rfMRI_plot <- all_IDP_results %>%
+  filter(MRI == "rfMRI") %>%
+  make_scatter_plot() +
+  ggtitle(paste0("ICs from rfMRI",
+                 " (", nrow(filter(all_IDP_results, MRI == "rfMRI")), " IDPs)")) +
+  labs(caption = paste0("r=", formatC(rfMRI_corr$estimate[[1]], digits = 2, format = "f"), 
+                 "\np=", ifelse(rfMRI_corr$p.value[[1]] < 0.01, formatC(rfMRI_corr$p.value[[1]], digits = 2, format = "e"),
+                                formatC(rfMRI_corr$p.value[[1]], digits = 2, format = "f"))))
+
+ggsave(
+  "rfMRI.png",
+  rfMRI_plot,
+  width = 3.25,
+  height = 3.25,
+  dpi = set_dpi)
+
+rfMRI_plot
+
+```
+
+
+==========================================================================
+Interaction Manhattan plot
+
+Set display group
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  
+  # Set the display names for color
+  mutate(display_group = paste0(MRI, "_", map, "_", dimension, "_", dMRI)) %>%
+  mutate(display_group = gsub("_NA", "", display_group)) %>%
+  mutate(display_group = gsub("_weighted_mean_", " ", display_group)) %>%
+  mutate(display_group = gsub("_", " ", display_group)) %>%
+  mutate(display_group = ifelse(IDP %in% total_volume_IDPs, "T1 total volume", display_group)) %>%
+  mutate(display_group = factor(display_group, levels = c("T1 total volume",
+                                                          "T1 freesurfer DKT area",
+                                                          "T1 freesurfer DKT thickness",
+                                                          "T1 freesurfer DKT volume",
+                                                          "T1 freesurfer ASEG volume",
+                                                          "T2",
+                                                          "rfMRI",
+                                                          "dMRI FA",
+                                                          "dMRI MD",
+                                                          "dMRI ICVF",
+                                                          "dMRI ISOVF"))) %>%
+  mutate(display_levels = as.integer(display_group))
+
+```
+
+
+Make the Manhattan plot (this one has all IDPs, including total volume)
+
+
+```{r, fig.height=3, fig.width=5}
+
+p_value <- 0.01
+
+#Define two shades to alternate for the different regions
+color_a <- "#000000"
+color_b = "#bcbcbc"
+
+manhattan_plot <- all_IDP_results %>%
+  mutate(color = ifelse(display_levels %% 2, color_b, color_a)) %>%
+  ggplot(aes(x = reorder(IDP, display_levels), y = -log10(scaled_interaction_p), color = color)) +
+  geom_point() +
+  ggtitle(paste0("Manhattan plot of interaction term in all IDPs",
+                 "\nN between ", min(regression_n$N), " to ", max(regression_n$N),
+                 ", IDPs=", nrow(all_IDP_results),
+                 ", Significant = ",
+                 nrow(filter(all_IDP_results, scaled_interaction_p <= (p_value))),
+                 "\nSignificance threshold: p < ", formatC(p_value, digits = 2, format = "f"))) +
+  xlab(" ") +
+  ylab("Negative log p value") +
+  geom_hline(yintercept = -log10(p_value), linetype = "dashed", color = "dark grey") +
+  geom_hline(yintercept = -log10(0.05 / nrow(all_IDP_results)), linetype = "dashed", color = "dark grey") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = "none") +
+  ylim(c(0, 8)) +
+  scale_color_manual(values = c(color_a, color_b))
+
+ggsave(
+  "manhattan.png",
+  manhattan_plot,
+  width = 5,
+  height = 3,
+  dpi = set_dpi)
+
+manhattan_plot
+
+
+```
+
+
+```{r}
+
+p_value <- 0.01
+
+sig_interaction_table <- all_IDP_results %>%
+  filter(scaled_interaction_p < p_value) %>%
+  select(display_group, numeric_IDP, IDP_name, scaled_week_drinks_beta, scaled_week_drinks_p,
+         scaled_pack_years_beta, scaled_pack_years_p,
+         scaled_interaction_beta, scaled_interaction_p) %>%
+  # Do some processing so the names display nicely
+  mutate(IDP_name = gsub(" hemisphere", "", IDP_name)) %>%
+  mutate(IDP_name = gsub("whole brain", "medial", IDP_name)) %>%
+  mutate(IDP_name = gsub("Volume of ", "", IDP_name)) %>%
+  mutate(IDP_name = gsub("Median T2star in ", "", IDP_name)) %>%
+  mutate(IDP_name = gsub("Weighted-mean MD in tract ", "", IDP_name)) %>%
+  mutate(IDP_name = gsub("Weighted-mean ICVF in tract ", "", IDP_name)) %>%
+  mutate(IDP_name = gsub("Weighted-mean ISOVF in tract ", "", IDP_name)) %>%
+  mutate(IDP_name = trimws(IDP_name)) %>%
+  mutate_at(c("scaled_week_drinks_beta", "scaled_pack_years_beta", "scaled_interaction_beta"),
+            ~formatC(.x, digits = 3, format = "f")) %>%
+  mutate_at(c("scaled_week_drinks_p", "scaled_pack_years_p", "scaled_interaction_p"),
+            ~ifelse(.x < 0.01, formatC(.x, digits = 1, format = "e"), formatC(.x, digits = 2, format = "f"))) %>%
+  arrange(display_group)
+
+sig_interaction_table
+
+```
+
+Save as an excel file to make a nice table
+```{r}
+
+write.csv(sig_interaction_table, file = paste0("sig_interaction_table_", Sys.Date(), ".csv"))
+
+```
+
+
+
+
+

@@ -1,0 +1,373 @@
+---
+title: "Regression with scaled predictors and total volumes"
+
+---
+
+7/25/24 Predictors and all IDPs scaled (z-score normalized, (x-mean)/sd) in results from this model
+
+predictors = week drinks, pack years, interaction
+
+As of 7/21/24:
+covariates = sex, age, income, education, BMI, diabetes, systolic BP, diastolic BP, headsize, imaging site, imaging date, rfMRI motion 
+
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library("broom")
+library(kableExtra)
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+Load the IDP names table to stitch in after regression is done
+From step 0 of the pipeline
+
+```{r}
+
+load(paste0(output_path, "IDP_names_table_", run_date, ".RData"))
+
+```
+
+
+Load then filter the genetic PCs
+```{r}
+
+load(paste0(output_path, "filtered_eid_p2_", run_date, ".RData"))
+
+```
+
+Load the processed imaging covariates
+From step 2 of the pipeline
+```{r}
+
+load(paste0(output_path, "/processed_imaging_covariates_", run_date, ".RData"))
+
+```
+
+Load the covariates that have been processed with backfilling imaging data with baseline data and then imputation
+From step 3 of the pipeline
+```{r}
+
+load(paste0(output_path, "/imputed_covariates_", run_date, ".RData"))
+
+```
+
+7/29/24 genetic PCs back in the model
+```{r}
+
+load(paste0(output_path, "/genetic_PC_", run_date, ".RData"))
+
+```
+
+Combine the tables to make a regression table
+```{r}
+
+regression_table <- imputation_results %>%
+  select(-c(sex, age, date)) %>%
+  filter(n_eid %in% filtered_eid) %>% 
+  left_join(imaging_covariates, by = "n_eid") %>%
+  left_join(genetic_PC, by = "n_eid")
+  
+rm(imputation_results)
+rm(imaging_covariates)
+gc()
+
+```
+Site is a categorical variable, factor and set the reference level
+```{r}
+
+regression_table <- regression_table %>%
+  mutate(site = factor(site, levels = c("cheadle", "reading", "newcastle", "bristol")))
+
+```
+
+
+7/8/24 Drop former alcohol use people
+```{r}
+
+load(paste0(output_path, "/n_tracker_p2_", run_date, ".RData"))
+
+```
+
+```{r}
+
+regression_table <- regression_table %>%
+  filter(alcohol_status != "Former")
+
+regression_table %>%
+  group_by(alcohol_status) %>%
+  tally()
+
+```
+
+
+```{r}
+
+n_tracker <- rbind(n_tracker, data.frame("Step" = "Former alcohol consumption removed", "N" = nrow(regression_table)))
+
+```
+
+
+Define a function for regression (will run on all the different sets of IDPs)
+
+```{r}
+
+
+do_IDP_regression <- function(IDP_table, vars_list, regression_table) {
+  # Function to perform regression using covariates in the regression table on all the IDPs in the supplied IDP table
+  # Will return a table with IDP, alcohol estimate and P value, and pack years estimate and P value
+  
+  # Join the IDPs onto the regression table
+  # Changed this to inner join, R has been sneakily dropping my n the WHOLE time
+  regression_table <- inner_join(IDP_table, regression_table, by = "n_eid", all = FALSE)
+  regression_table <- na.omit(regression_table)
+  # Print the N so user is alerted if this happens
+  print(paste0("IDP N=", nrow(IDP_table), ", regression N=", nrow(regression_table)))
+  
+  IDP_names <- colnames(IDP_table)
+  IDP_names <- IDP_names[IDP_names != "n_eid"]
+  
+  regression <- lapply(IDP_names, function(x) glm(formula(paste("unlist(regression_table[,x]) ~",
+                                             paste(vars_list, collapse = "+"))),
+                                              family = "gaussian", data = regression_table))
+  
+  regression <- lapply(regression, tidy)
+  
+  regression_results <- data.frame("alcohol_beta" = c(), "alcohol_p" = c())
+
+  for (n in 1:length(regression)) {
+    
+    IDP <- IDP_names[n]
+    summary_tibble <- regression[[n]]
+    
+    summary_tibble <- summary_tibble %>%
+      mutate(term = gsub("\\(", "", term)) %>%
+      mutate(term = gsub("\\)", "", term)) %>%
+      mutate(term = tolower(term)) %>%
+      select(term, estimate, std.error, p.value) %>%
+      pivot_longer(cols = c(estimate, std.error, p.value), names_to = "stat", values_to = "value")
+    
+    summary_tibble <- summary_tibble %>%
+      mutate(col_name = case_when(
+      (stat == "estimate") ~ paste0(term, "_beta"),
+      (stat == "std.error") ~ paste0(term, "_se"),
+      (stat == "p.value") ~ paste0(term, "_p"))) %>%
+      select(col_name, value) %>%
+      pivot_wider(names_from = col_name, values_from = value)
+    
+    new_row <- data.frame("IDP" = IDP)
+    
+    new_row <- cbind(new_row, summary_tibble)
+    
+    
+    regression_results <- rbind(regression_results, new_row)
+    
+  }
+  
+
+  return(regression_results)
+}
+
+
+```
+
+Set up the list of covariates (updated 7/25/24)
+```{r}
+
+covariates <-c("sex", "age", "income", "education_years", "BMI", "diabetes", "systolic_BP", "diastolic_BP",
+               "head_size", "site", "date", "rfMRI_motion",
+               "PC_1", "PC_2", "PC_3", "PC_4", "PC_5", "PC_6", "PC_7", "PC_8", "PC_9", "PC_10")
+
+```
+
+
+Set the predictors for this set of regression analyses
+7/25/24 Normalized predictors in this regression
+```{r}
+
+predictors <- c("scaled_week_drinks", "scaled_pack_years", "scaled_week_drinks*scaled_pack_years")
+
+```
+
+
+Load IDPs and perform regression
+```{r}
+
+load(paste0(output_path, "total_volumes_", run_date, ".RData"))
+
+# 7/25/24 scaled total volume measures in this regression script
+total_volumes <- mutate_at(total_volumes, vars(-n_eid), ~scale(.x, center = TRUE, scale = TRUE))
+
+
+all_IDP_results <- do_IDP_regression(total_volumes, c(predictors, covariates), regression_table)
+
+# Save final N in the regression
+regression_n_tracker <- data.frame("Step" = c("Regression"),
+           "MRI" = c("total volumes"),
+           "N" = c(nrow(na.omit(inner_join(total_volumes, regression_table, by = "n_eid", all = FALSE)))))
+
+rm(total_volumes)
+
+```
+
+Run on regional IDPs
+```{r}
+
+load(paste0(output_path, "T1_", run_date, ".RData"))
+
+T1_results <- do_IDP_regression(T1, c(predictors, covariates), regression_table)
+
+all_IDP_results <- bind_rows(all_IDP_results,T1_results)
+
+# Save final N in the regression
+regression_n_tracker <- rbind(regression_n_tracker, data.frame("Step" = c("Regression"),
+           "MRI" = c("T1"),
+           "N" = c(nrow(na.omit(inner_join(T1, regression_table, by = "n_eid", all = FALSE))))))
+
+rm(T1)
+rm(T1_results)
+gc()
+
+
+```
+
+
+
+```{r}
+
+load(paste0(output_path, "T2_", run_date, ".RData"))
+
+T2_results <- do_IDP_regression(T2, c(predictors, covariates), regression_table)
+
+all_IDP_results <- bind_rows(all_IDP_results, T2_results)
+
+
+# Save final N in the regression
+regression_n_tracker <- rbind(regression_n_tracker, data.frame("Step" = c("Regression"),
+           "MRI" = c("T2"),
+           "N" = c(nrow(na.omit(inner_join(T2, regression_table, by = "n_eid", all = FALSE))))))
+
+rm(T2)
+rm(T2_results)
+gc()
+
+
+```
+
+
+```{r}
+
+load(paste0(output_path, "rfMRI_", run_date, ".RData"))
+
+rfMRI_results <- do_IDP_regression(rfMRI, c(predictors, covariates), regression_table)
+
+all_IDP_results <- bind_rows(all_IDP_results, rfMRI_results)
+
+
+# Save final N in the regression
+regression_n_tracker <- rbind(regression_n_tracker, data.frame("Step" = c("Regression"),
+           "MRI" = c("rfMRI"),
+           "N" = c(nrow(na.omit(inner_join(rfMRI, regression_table, by = "n_eid", all = FALSE))))))
+
+rm(rfMRI)
+rm(rfMRI_results)
+gc()
+
+```
+
+
+Load the dMRI IDPs and run regression, will filter for FA, MD, ICVF, ISOVF later
+NOT controlling for the overall average trend in this set
+```{r}
+
+load(paste0(output_path, "dMRI_", run_date, ".RData"))
+
+dMRI_results <- do_IDP_regression(dMRI, c(predictors, covariates),
+                                regression_table)
+
+all_IDP_results <- bind_rows(all_IDP_results, dMRI_results)
+
+# Save final N in the regression
+regression_n_tracker <- rbind(regression_n_tracker, data.frame("Step" = c("Regression"),
+           "MRI" = c("dMRI"),
+           "N" = c(nrow(na.omit(inner_join(dMRI, regression_table, by = "n_eid", all = FALSE))))))
+
+rm(dMRI)
+rm(dMRI_results)
+gc()
+
+
+```
+
+Do some name fixing
+```{r}
+
+all_IDP_results <- all_IDP_results %>%
+  dplyr::rename("scaled_interaction_beta" = `scaled_week_drinks:scaled_pack_years_beta`) %>%
+  dplyr::rename("scaled_interaction_se" = `scaled_week_drinks:scaled_pack_years_se`) %>%
+  dplyr::rename("scaled_interaction_p" = `scaled_week_drinks:scaled_pack_years_p`)
+
+```
+
+Bind the expanded IDP information to the tables
+```{r}
+
+all_IDP_results <- left_join(all_IDP_results, IDP_name_table, by = "IDP")
+
+```
+
+Save the regression results
+```{r}
+
+save(all_IDP_results, file = paste0(output_path, "regression_scaled_", Sys.Date(), ".RData"))
+save(regression_n_tracker, file = paste0(output_path, "regression_n_tracker_", Sys.Date(), ".RData"))
+save(n_tracker, file = paste0(output_path, "n_tracker_p7_", Sys.Date(), ".RData"))
+
+```
+
+```{r}
+
+regression_n_tracker
+
+```
+
+
+Check IDPs in the regression results
+```{r}
+
+all_IDP_results %>%
+  mutate(group = ifelse(IDP %in% c("X26514.2.0", "X26518.2.0", "total_wm", "X26527.2.0", "X26528.2.0"), "global", "regional")) %>%
+  group_by(MRI, map, dimension, dMRI, group) %>%
+  tally() %>%
+  mutate(MRI = factor(MRI, levels = c("T1", "T2", "rfMRI", "dMRI"))) %>%
+  arrange(MRI) %>%
+  arrange(group) %>%
+  kable()
+
+
+
+```
+
+
+
+

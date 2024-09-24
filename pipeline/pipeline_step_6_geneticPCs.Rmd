@@ -1,0 +1,102 @@
+---
+title: "Pipeline step 6 genetic principal components"
+---
+
+We include the first 10 genetic PCs since this is generally enough in a European population.
+
+```{r}
+library(dplyr) # Run install.packages("tidyverse") to get this
+library(tidyr) # Run install.packages("tidyr") to get this
+library(ggplot2)
+library("reshape") # Run install.packages("reshape") to get this
+library(kableExtra) # Run install.packages("kableExtra")
+
+```
+
+Set the date to reference
+```{r}
+
+run_date <- "2024-07-29"
+
+```
+
+Set the filepaths for input and output
+ENSURE THIS IS A LOCATION SUITABLE FOR STORAGE OF UKB DATA
+```{r}
+
+input_path <- # data set storage location
+
+output_path <- # script outputs storage location
+
+```
+
+
+Load the PCs
+```{r}
+
+genetic_PC <- read.csv(paste0(input_path, "ukb_pc20_9-28-22.csv"))
+
+```
+
+```{r}
+
+load(paste0(output_path, "filtered_eid_p2_", run_date, ".RData"))
+
+genetic_PC <- genetic_PC %>%
+  filter(genetic_PC$n_eid %in% filtered_eid)
+
+```
+
+
+Select the first 10
+```{r}
+
+genetic_PC <- genetic_PC[,1:11]
+
+```
+
+Rename the columns so they are more readable
+```{r}
+
+genetic_PC <- genetic_PC %>%
+  rename_with(~ gsub("n_22009_0_", "", .x)) %>%
+  rename_with(~ paste0("PC_", .x)) %>%
+  # Fix n_eid, it is not a PC
+  dplyr::rename("n_eid" = PC_n_eid)
+
+head(genetic_PC)
+
+```
+
+Remove any rows that are missing genetic components
+
+```{r}
+
+print(paste0("Before: ", nrow(genetic_PC)))
+n_before <- nrow(genetic_PC)
+
+genetic_PC <- na.omit(genetic_PC)
+
+print(paste0("After: ", nrow(genetic_PC)))
+print(paste0((n_before - nrow(genetic_PC)), " participants dropped for missing genetic PCs"))
+
+```
+
+Save the genetic PCs and a list of the IDs which have PCs
+```{r}
+
+genetic_PC_eid <- genetic_PC$n_eid
+
+save(genetic_PC_eid, file = paste0(output_path, "genetic_PC_eid_", Sys.Date(), ".RData"))
+
+save(genetic_PC, file = paste0(output_path, "genetic_PC_", Sys.Date(), ".RData"))
+
+```
+
+
+```{r}
+
+print(paste0("Script last run ", Sys.Date()))
+
+```
+
